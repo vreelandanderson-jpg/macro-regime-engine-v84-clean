@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover
     st_autorefresh = None
 
-APP_VERSION = "v8.4 Clean Repository"
+APP_VERSION = "v8.6 Full Sector + Science Universe"
 LOCAL_TZ = ZoneInfo("America/Toronto")
 REFRESH_SECONDS = 30
 
@@ -91,6 +91,45 @@ UNIVERSE: List[Asset] = [
     Asset("XBI", "Biotech Equal Weight", "Sub-Sectors", "Sub-Sectors", "speculative biotech", 1),
     Asset("ITA", "Aerospace Defense", "Sub-Sectors", "Sub-Sectors", "defense", 0),
     Asset("XAR", "Aerospace Defense Equal", "Sub-Sectors", "Sub-Sectors", "defense", 0),
+    # Healthcare / science / life-science / defensive innovation
+    Asset("VHT", "Vanguard Healthcare", "Healthcare", "Healthcare", "broad healthcare", -1),
+    Asset("IYH", "US Healthcare", "Healthcare", "Healthcare", "broad healthcare", -1),
+    Asset("ARKG", "Genomics Innovation", "Biotech / Science", "Science", "genomics / innovation", 1),
+    Asset("GNOM", "Genomics ETF", "Biotech / Science", "Science", "genomics / biotech", 1),
+    Asset("PJP", "Pharmaceuticals ETF", "Pharma", "Healthcare", "pharma basket", -1),
+    Asset("IHE", "Pharmaceuticals", "Pharma", "Healthcare", "pharma basket", -1),
+    Asset("LLY", "Eli Lilly", "Pharma", "Healthcare", "mega-cap pharma", -1),
+    Asset("NVO", "Novo Nordisk", "Pharma", "Healthcare", "obesity / pharma", -1),
+    Asset("MRK", "Merck", "Pharma", "Healthcare", "defensive pharma", -1),
+    Asset("PFE", "Pfizer", "Pharma", "Healthcare", "pharma", -1),
+    Asset("ABBV", "AbbVie", "Pharma", "Healthcare", "pharma", -1),
+    Asset("BMY", "Bristol Myers", "Pharma", "Healthcare", "pharma", -1),
+    Asset("JNJ", "Johnson & Johnson", "Pharma", "Healthcare", "defensive healthcare", -1),
+    Asset("IHI", "Medical Devices", "Medical Devices", "Healthcare", "medical devices ETF", -1),
+    Asset("MDT", "Medtronic", "Medical Devices", "Healthcare", "medical devices", -1),
+    Asset("SYK", "Stryker", "Medical Devices", "Healthcare", "medical devices", -1),
+    Asset("ISRG", "Intuitive Surgical", "Medical Devices", "Healthcare", "surgical robotics", 1),
+    Asset("BSX", "Boston Scientific", "Medical Devices", "Healthcare", "medical devices", -1),
+    Asset("ABT", "Abbott Labs", "Medical Devices", "Healthcare", "devices / diagnostics", -1),
+    Asset("TMO", "Thermo Fisher", "Life Science Tools", "Science", "life science tools", 1),
+    Asset("DHR", "Danaher", "Life Science Tools", "Science", "life science tools", 1),
+    Asset("A", "Agilent", "Life Science Tools", "Science", "lab instruments", 1),
+    Asset("ILMN", "Illumina", "Life Science Tools", "Science", "genomics tools", 1),
+    Asset("IDXX", "IDEXX Labs", "Life Science Tools", "Science", "diagnostics", 1),
+    Asset("IHF", "Healthcare Providers", "Healthcare Services", "Healthcare", "providers / insurers", -1),
+    Asset("UNH", "UnitedHealth", "Healthcare Services", "Healthcare", "managed care", -1),
+    Asset("CI", "Cigna", "Healthcare Services", "Healthcare", "managed care", -1),
+    Asset("HUM", "Humana", "Healthcare Services", "Healthcare", "managed care", -1),
+    Asset("ELV", "Elevance Health", "Healthcare Services", "Healthcare", "managed care", -1),
+    Asset("CVS", "CVS Health", "Healthcare Services", "Healthcare", "healthcare services", -1),
+    Asset("LMT", "Lockheed Martin", "Defense / Aerospace", "Defense", "defense prime", 0),
+    Asset("RTX", "RTX", "Defense / Aerospace", "Defense", "defense / aerospace", 0),
+    Asset("NOC", "Northrop Grumman", "Defense / Aerospace", "Defense", "defense prime", 0),
+    Asset("GD", "General Dynamics", "Defense / Aerospace", "Defense", "defense prime", 0),
+    Asset("BA", "Boeing", "Defense / Aerospace", "Defense", "aerospace / defense", 1),
+    Asset("ICLN", "Clean Energy", "Clean Energy", "Climate / Energy", "clean energy ETF", 1),
+    Asset("NLR", "Nuclear Energy", "Clean Energy", "Climate / Energy", "nuclear energy", 0),
+    Asset("LIT", "Lithium Batteries", "Clean Energy", "Climate / Energy", "lithium / battery chain", 1),
     # Bonds / dollar / vol / credit
     Asset("UUP", "US Dollar ETF", "Dollar", "Dollar", "dollar pressure", -1),
     Asset("DX-Y.NYB", "Dollar Index", "Dollar", "Dollar", "DXY reference", -1),
@@ -159,11 +198,11 @@ UNIVERSE: List[Asset] = [
 ASSET_MAP = {a.symbol: a for a in UNIVERSE}
 RISK_ON = {"^GSPC", "SPY", "^NDX", "QQQ", "RSP", "IWM", "HYG", "JNK", "NVDA", "SMH", "SOXX", "XLK", "XLY", "XLF", "XLRE", "VNQ", "ITB", "BTC-USD"}
 RISK_OFF = {"UUP", "DX-Y.NYB", "^TNX", "^FVX", "^IRX", "^VIX", "^VVIX", "^VIX9D", "^VIX3M", "^SKEW"}
-CORE_TILES = ["^GSPC", "QQQ", "RSP", "UUP", "^TNX", "^VIX", "GC=F", "CL=F", "NVDA", "SMH", "HYG", "BTC-USD", "XLRE", "VNQ", "ITB", "XLF", "KRE", "EEM"]
+CORE_TILES = ["^GSPC", "QQQ", "RSP", "UUP", "^TNX", "^VIX", "GC=F", "CL=F", "NVDA", "SMH", "HYG", "BTC-USD", "XLRE", "XLV", "IBB", "LLY", "IHI", "ITA", "ICLN", "EEM"]
 
 NEWS_QUERIES = [
     "Federal Reserve markets", "CPI inflation stocks", "China semiconductor Nvidia", "oil prices geopolitics",
-    "regional banks credit stress", "real estate mortgage rates", "Treasury yields auction", "AI stocks earnings",
+    "regional banks credit stress", "real estate mortgage rates", "Treasury yields auction", "AI stocks earnings", "healthcare stocks FDA", "biotech stocks clinical trial", "pharmaceutical earnings", "defense stocks geopolitics", "clean energy nuclear lithium",
 ]
 
 EVENTS = [
@@ -349,6 +388,10 @@ def calc_scores(df: pd.DataFrame) -> Dict[str, float]:
         "Liquidity": score_group(df, ["UUP", "DX-Y.NYB", "^TNX", "^FVX", "^IRX", "TLT", "IEF", "HYG", "JNK"]),
         "Risk": score_group(df, ["^GSPC", "QQQ", "RSP", "HYG", "BTC-USD", "^VIX", "UUP", "^TNX"]),
         "Real Estate": score_group(df, ["XLRE", "VNQ", "IYR", "ITB", "XHB", "MBB", "REM"]),
+        "Healthcare": score_group(df, ["XLV", "VHT", "IYH", "IBB", "XBI", "PJP", "IHE", "LLY", "NVO", "UNH", "IHI"]),
+        "Science": score_group(df, ["ARKG", "GNOM", "TMO", "DHR", "A", "ILMN", "IDXX", "ISRG"]),
+        "Defense": score_group(df, ["ITA", "XAR", "LMT", "RTX", "NOC", "GD", "BA"]),
+        "Clean Energy": score_group(df, ["TAN", "ICLN", "URA", "NLR", "LIT"]),
         "Global": score_group(df, ["EWC", "VGK", "EWG", "EWJ", "FXI", "MCHI", "INDA", "EEM", "EFA"]),
     }
     return {k: round(v, 1) for k, v in scores.items()}
@@ -384,6 +427,12 @@ def detect_active_causes(df: pd.DataFrame) -> List[Dict[str, object]]:
     rsp = value(df, "RSP", "score")
     btc = value(df, "BTC-USD", "score")
     semis = score_group(df, ["SMH", "SOXX", "NVDA", "AMD", "AVGO", "TSM", "ASML"])
+    healthcare = score_group(df, ["XLV", "VHT", "IYH", "IBB", "XBI", "PJP", "IHE", "LLY", "NVO", "UNH", "IHI"])
+    biotech = score_group(df, ["IBB", "XBI", "ARKG", "GNOM", "ILMN"])
+    pharma = score_group(df, ["PJP", "IHE", "LLY", "NVO", "MRK", "PFE", "ABBV", "BMY", "JNJ"])
+    devices = score_group(df, ["IHI", "MDT", "SYK", "ISRG", "BSX", "ABT"])
+    defense = score_group(df, ["ITA", "XAR", "LMT", "RTX", "NOC", "GD", "BA"])
+    clean_energy = score_group(df, ["TAN", "ICLN", "URA", "NLR", "LIT"])
     confirms, contradictions = [], []
     if dxy_chg > 0.2 and teny_chg > 0.1:
         confirms = ["Dollar rising", "10Y firm"]
@@ -416,6 +465,18 @@ def detect_active_causes(df: pd.DataFrame) -> List[Dict[str, object]]:
         causes.append({"cause":"Gold safety bid", "status":"ACTIVE", "category":"Commodity / Fear", "affected":"Gold, miners, dollar/yields relationship", "effect":"Defensive demand active", "target":"Gold continuation if fear/yields support it", "confirm":["gold up", "risk/fear context"], "contradict":[], "severity":54})
     if btc < -20 and qqq < -10:
         causes.append({"cause":"Liquidity beta unwind", "status":"ACTIVE", "category":"Crypto / Risk", "affected":"BTC, ETH, crypto equities, QQQ", "effect":"Speculative risk appetite weakening", "target":"Crypto lower unless QQQ/liquidity recover", "confirm":["BTC weak", "QQQ weak"], "contradict":[], "severity":55})
+    if healthcare > 20 and value(df, "QQQ", "score") < -10:
+        causes.append({"cause":"Defensive healthcare rotation", "status":"ACTIVE", "category":"Healthcare", "affected":"XLV, VHT, IYH, pharma, insurers, devices", "effect":"Capital rotating away from growth into defensive healthcare", "target":"Healthcare relative strength; QQQ risk-on needs healthcare rotation to cool", "confirm":["Healthcare bid", "Growth weak"], "contradict":[], "severity":56})
+    if biotech < -20 and (teny_chg > 0 or dxy_chg > 0):
+        causes.append({"cause":"Biotech / genomics rate pressure", "status":"ACTIVE", "category":"Biotech / Science", "affected":"IBB, XBI, ARKG, GNOM, ILMN", "effect":"Speculative science growth under funding-rate pressure", "target":"Biotech downside until yields/dollar cool", "confirm":["Biotech weak", "Rates/dollar firm"], "contradict":[], "severity":54})
+    if pharma > 20 and qqq < -10:
+        causes.append({"cause":"Pharma defensive bid", "status":"ACTIVE", "category":"Pharma", "affected":"PJP, IHE, LLY, NVO, MRK, PFE, ABBV, JNJ", "effect":"Defensive healthcare leadership active", "target":"Pharma relative strength; risk assets need broad reclaim", "confirm":["Pharma positive", "QQQ weak"], "contradict":[], "severity":50})
+    if devices < -20:
+        causes.append({"cause":"Medical device weakness", "status":"WATCH", "category":"Medical Devices", "affected":"IHI, MDT, SYK, ISRG, BSX, ABT", "effect":"Healthcare growth/device pocket under pressure", "target":"Device weakness can drag healthcare if XLV also turns", "confirm":["Devices weak"], "contradict":[], "severity":44})
+    if defense > 20 and (gold > 0 or vix_chg > 0):
+        causes.append({"cause":"Defense / geopolitical safety rotation", "status":"ACTIVE", "category":"Defense / Aerospace", "affected":"ITA, XAR, LMT, RTX, NOC, GD, BA", "effect":"Defense leadership can signal geopolitical or safety positioning", "target":"Defense bid continuation if fear/oil/gold confirm", "confirm":["Defense bid", "Fear context"], "contradict":[], "severity":52})
+    if clean_energy < -20 and teny_chg > 0:
+        causes.append({"cause":"Clean energy rate pressure", "status":"WATCH", "category":"Clean Energy", "affected":"TAN, ICLN, LIT, URA, NLR", "effect":"Rate-sensitive climate/energy assets under pressure", "target":"Clean energy downside until yields cool", "confirm":["Clean energy weak", "10Y firm"], "contradict":[], "severity":43})
     if not causes:
         causes.append({"cause":"No clean dominant driver", "status":"MIXED", "category":"Cross-market", "affected":"Market broad", "effect":"Chop / wait state", "target":"Wait for dollar/yields/VIX/internals alignment", "confirm":[], "contradict":["No clean agreement"], "severity":20})
     return sorted(causes, key=lambda x: x["severity"], reverse=True)
@@ -505,6 +566,14 @@ def headline_affected(title: str) -> str:
         return "Credit / banks / financials"
     if any(k in low for k in ["home", "housing", "mortgage", "real estate"]):
         return "Real estate / housing"
+    if any(k in low for k in ["healthcare", "pharma", "drug", "fda", "medicare", "unitedhealth", "lilly", "novo"]):
+        return "Healthcare / pharma"
+    if any(k in low for k in ["biotech", "genomics", "clinical trial", "science", "medical device"]):
+        return "Biotech / science / medical devices"
+    if any(k in low for k in ["defense", "aerospace", "missile", "pentagon", "war"]):
+        return "Defense / aerospace"
+    if any(k in low for k in ["solar", "clean energy", "nuclear", "uranium", "lithium", "battery"]):
+        return "Clean energy / nuclear / lithium"
     return "Broad market"
 
 def extended_hours_read(intra: Dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -687,6 +756,8 @@ with st.sidebar:
         "Navigation",
         [
             "Action Console", "Live Pulse", "Active Causes", "Extended Hours", "Real Estate",
+            "Healthcare", "Biotech / Science", "Pharma", "Medical Devices", "Life Science Tools",
+            "Healthcare Services", "Defense / Aerospace", "Clean Energy",
             "Sectors", "Sub-Sectors", "Currencies", "Credit", "Volatility", "Global Markets",
             "Events", "Search", "Data Health", "Raw Tables"
         ],
@@ -710,7 +781,7 @@ causes = detect_active_causes(market) if not market.empty else []
 action = compute_action(market, causes) if not market.empty else {
     "state":"NO DATA", "primary_driver":"No data loaded", "pressure_asset":"N/A", "support_asset":"N/A",
     "target_pressure":"N/A", "quality":"N/A", "confidence":0, "confirmations":0, "contradictions":0,
-    "scores": {"Macro":0,"AI":0,"Internals":0,"Liquidity":0,"Risk":0,"Real Estate":0,"Global":0}
+    "scores": {"Macro":0,"AI":0,"Internals":0,"Liquidity":0,"Risk":0,"Real Estate":0,"Healthcare":0,"Science":0,"Defense":0,"Clean Energy":0,"Global":0}
 }
 
 def cls_for_score(score: float) -> str:
@@ -900,7 +971,7 @@ if page == "Action Console":
 
 elif page == "Live Pulse":
     st.markdown("<div class='section-title'>LIVE MARKET PULSE</div>", unsafe_allow_html=True)
-    cats = ["All", "Indexes", "AI / Tech", "Semiconductors", "Real Estate", "Sectors", "Sub-Sectors", "Bonds", "Dollar", "Commodities", "Currencies", "Crypto", "Credit", "Volatility", "Global"]
+    cats = ["All", "Indexes", "AI / Tech", "Semiconductors", "Real Estate", "Healthcare", "Biotech / Science", "Pharma", "Medical Devices", "Life Science Tools", "Healthcare Services", "Defense / Aerospace", "Clean Energy", "Sectors", "Sub-Sectors", "Bonds", "Dollar", "Commodities", "Currencies", "Crypto", "Credit", "Volatility", "Global"]
     cat = st.radio("Filter", cats, horizontal=True)
     data = market if cat == "All" else market[market.category == cat]
     symbols = data.symbol.tolist()
@@ -936,7 +1007,7 @@ elif page == "Extended Hours":
         st.dataframe(eh, use_container_width=True, hide_index=True)
     st.caption("Tracks pre-market, regular NY, after-hours, overnight, and latest 1H/4H closes where feed provides intraday bars.")
 
-elif page in ["Real Estate", "Sectors", "Sub-Sectors", "Currencies", "Credit", "Volatility", "Global Markets"]:
+elif page in ["Real Estate", "Healthcare", "Biotech / Science", "Pharma", "Medical Devices", "Life Science Tools", "Healthcare Services", "Defense / Aerospace", "Clean Energy", "Sectors", "Sub-Sectors", "Currencies", "Credit", "Volatility", "Global Markets"]:
     cat_map = {"Global Markets":"Global"}
     cat = cat_map.get(page, page)
     st.markdown(f"<div class='section-title'>{page.upper()}</div>", unsafe_allow_html=True)
@@ -984,7 +1055,7 @@ elif page == "Search":
             with st.expander("Direct match table", expanded=False):
                 st.dataframe(res[["symbol","name","category","latest_close","change_pct","score","state","role"]], use_container_width=True, hide_index=True)
         else:
-            st.info("No direct match. Try QQQ, NDX, real estate, semis, gold, yields, credit, volatility, oil.")
+            st.info("No direct match. Try QQQ, NDX, real estate, healthcare, biotech, pharma, science, defense, clean energy, semis, gold, yields, credit, volatility, oil.")
 
 elif page == "Data Health":
     st.markdown("<div class='section-title'>DATA HEALTH</div>", unsafe_allow_html=True)

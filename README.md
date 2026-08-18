@@ -1,21 +1,23 @@
-# Macro Regime Engine v8.5 Visual Action Console
+# Macro Regime Engine v8.6 — Full Sector + Science Universe
 
-Clean visual rebuild focused on actionable layout.
+Clean Streamlit-native build. Upload only `app.py`, `README.md`, `requirements.txt`, and `.gitignore` to Streamlit/GitHub.
 
-## Streamlit Cloud
-Main file path: `app.py`
+Added in v8.6:
+- Healthcare universe: XLV, VHT, IYH
+- Biotech / science: IBB, XBI, ARKG, GNOM
+- Pharma: PJP, IHE, LLY, NVO, MRK, PFE, ABBV, BMY, JNJ
+- Medical devices: IHI, MDT, SYK, ISRG, BSX, ABT
+- Life science tools: TMO, DHR, A, ILMN, IDXX
+- Healthcare services: IHF, UNH, CI, HUM, ELV, CVS
+- Defense / aerospace: ITA, XAR, LMT, RTX, NOC, GD, BA
+- Clean energy / science: TAN, ICLN, URA, NLR, LIT
+- Active-cause logic for healthcare rotation, biotech rate pressure, pharma defensive bid, devices weakness, defense safety bid, clean-energy rate pressure
 
-Required files:
-- app.py
-- requirements.txt
-- README.md
-- .gitignore
-
-## Fixes
-- Cleaner command-console layout
-- Action first: NOW / ACTIVE CAUSE / TARGET / OUTCOME / CONFIRM / INVALIDATE / AVOID
-- No raw tables on home screen
-- Cleaner selectable live tiles
-- Gauges kept
-- Extended-hours and active-cause logic kept
-- Full universe kept
+Kept:
+- Action console
+- Gauges
+- Selectable live tiles
+- Active cause engine
+- Extended-hours NAS/QQQ/NQ tracking
+- Full universe from prior builds
+- No FRED and no demo logic
