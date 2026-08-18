@@ -635,8 +635,43 @@ def render_tile(row: pd.Series, selected: str) -> bool:
     label = f"{row.symbol}\n{fmt_num(row.latest_close)}\n{row.change_pct:+.2f}%\n{row.state}"
     return st.button(label, key=f"tile_{row.symbol}", use_container_width=True, type="primary" if row.symbol == selected else "secondary")
 
+
 # ------------------------- UI -------------------------
 st.set_page_config(page_title="Macro Regime Engine", layout="wide", page_icon="📡")
+
+st.markdown("""
+<style>
+    #MainMenu, footer {visibility: hidden;}
+    header {visibility: hidden; height: 0px;}
+    .block-container {padding-top: 1.15rem; padding-bottom: 2rem; max-width: 1500px;}
+    [data-testid="stSidebar"] {background: #07111f; border-right: 1px solid rgba(120,160,220,.16);}
+    [data-testid="stSidebar"] * {font-size: 14px;}
+    div[data-testid="stMetric"] {background: rgba(14,30,48,.80); border: 1px solid rgba(111,159,213,.18); border-radius: 14px; padding: 12px 14px; min-height: 78px;}
+    div[data-testid="stMetric"] label {color: #9fb1c6 !important; font-size: .73rem !important; letter-spacing: .06em; text-transform: uppercase;}
+    div[data-testid="stMetricValue"] {font-size: 1.35rem !important; font-weight: 800 !important;}
+    div.stButton > button {border-radius: 14px; border: 1px solid rgba(95,150,210,.35); background: rgba(13,31,51,.96); color: #f5f8ff; min-height: 42px; white-space: pre-line; line-height: 1.18; font-weight: 750; overflow: hidden;}
+    div.stButton > button:hover {border-color: rgba(80,190,255,.85); background: rgba(20,48,78,.98); color: white;}
+    .top-shell {border: 1px solid rgba(122,164,220,.24); background: linear-gradient(90deg, rgba(8,24,40,.94), rgba(28,20,58,.82)); border-radius: 22px; padding: 12px 16px; margin: 0 0 14px 0;}
+    .mini-label {color:#91a4ba; font-size:.72rem; letter-spacing:.12em; text-transform:uppercase; font-weight:800; margin-bottom:4px;}
+    .big-read {font-size:2rem; font-weight:900; letter-spacing:.01em; margin: 0;}
+    .sub-read {font-size:.94rem; color:#aab9cc; margin-top:6px;}
+    .good {color:#35d07f; font-weight:900;}
+    .bad {color:#ff4b4b; font-weight:900;}
+    .warn {color:#ffd23f; font-weight:900;}
+    .card-title {font-size:.76rem; color:#b8c6d8; letter-spacing:.10em; text-transform:uppercase; font-weight:900; margin-bottom:.25rem;}
+    .section-title {font-size:1.15rem; font-weight:900; margin: 1.2rem 0 .45rem 0; letter-spacing:.03em;}
+    .muted {color:#9fb1c6; font-size:.90rem;}
+    .chip {display:inline-block; padding:.22rem .55rem; border-radius:999px; border:1px solid rgba(120,160,220,.24); background:rgba(12,30,48,.9); color:#c9d9ee; font-size:.72rem; font-weight:800; margin:.12rem .18rem .12rem 0;}
+    .chip-good {border-color:rgba(53,208,127,.45); color:#35d07f;}
+    .chip-bad {border-color:rgba(255,75,75,.45); color:#ff6666;}
+    .chip-warn {border-color:rgba(255,210,63,.45); color:#ffd23f;}
+    .tile-caption {font-size:.78rem; color:#9fb1c6; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .tile-main {font-size:1.08rem; font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .tile-price {font-size:1.28rem; font-weight:900; margin-top:.1rem;}
+    .tile-foot {font-size:.78rem; font-weight:800; margin-top:.2rem;}
+    .tight-table div[data-testid="stDataFrame"] {font-size: 0.78rem;}
+</style>
+""", unsafe_allow_html=True)
 
 if "selected_symbol" not in st.session_state:
     st.session_state.selected_symbol = "QQQ"
@@ -645,41 +680,163 @@ if "auto_refresh" not in st.session_state:
 if "refresh_interval" not in st.session_state:
     st.session_state.refresh_interval = REFRESH_SECONDS
 
+# Sidebar: clean nav only
 with st.sidebar:
-    st.title(f"MACRO REGIME ENGINE {APP_VERSION}")
-    page = st.radio("Navigation", [
-        "Action Console", "Live Market Pulse", "Active Causes", "Extended Hours", "Real Estate", "Sectors", "Sub-Sectors",
-        "Currencies", "Credit", "Volatility", "Global Markets", "Events", "Search", "Data Health", "Raw Tables"
-    ], label_visibility="collapsed")
+    st.markdown(f"### MACRO REGIME ENGINE\n<span class='muted'>{APP_VERSION}</span>", unsafe_allow_html=True)
+    page = st.radio(
+        "Navigation",
+        [
+            "Action Console", "Live Pulse", "Active Causes", "Extended Hours", "Real Estate",
+            "Sectors", "Sub-Sectors", "Currencies", "Credit", "Volatility", "Global Markets",
+            "Events", "Search", "Data Health", "Raw Tables"
+        ],
+        label_visibility="collapsed",
+    )
     st.divider()
     st.toggle("Auto re-run", key="auto_refresh")
-    st.selectbox("Refresh interval", [15, 30, 60, 120], key="refresh_interval")
-    st.caption("Toronto / Eastern 12-hour time")
+    st.selectbox("Interval", [15, 30, 60, 120], key="refresh_interval")
+    st.caption("America/Toronto · 12-hour time")
 
 if st.session_state.auto_refresh and st_autorefresh is not None:
     st_autorefresh(interval=int(st.session_state.refresh_interval) * 1000, key="global_live_refresh")
 
+# Data load
 symbols_tuple = tuple([a.symbol for a in UNIVERSE])
-with st.spinner("Loading live market data..."):
+with st.spinner("Loading live market state..."):
     intra = fetch_intraday(symbols_tuple)
     daily = fetch_daily(symbols_tuple)
 market = build_market_frame(intra, daily)
 causes = detect_active_causes(market) if not market.empty else []
-action = compute_action(market, causes) if not market.empty else {"state":"NO DATA", "primary_driver":"No data loaded", "pressure_asset":"N/A", "support_asset":"N/A", "target_pressure":"N/A", "quality":"N/A", "confidence":0, "confirmations":0, "contradictions":0, "scores":{}}
+action = compute_action(market, causes) if not market.empty else {
+    "state":"NO DATA", "primary_driver":"No data loaded", "pressure_asset":"N/A", "support_asset":"N/A",
+    "target_pressure":"N/A", "quality":"N/A", "confidence":0, "confirmations":0, "contradictions":0,
+    "scores": {"Macro":0,"AI":0,"Internals":0,"Liquidity":0,"Risk":0,"Real Estate":0,"Global":0}
+}
 
-# Top command bar: native Streamlit only
-cmd_cols = st.columns([3.2, 0.8, 0.9, 1.0, 0.9, 0.9])
+def cls_for_score(score: float) -> str:
+    return "good" if score > 25 else "bad" if score < -25 else "warn"
+
+def change_class(chg: float, risk_sign: int = 1) -> str:
+    aligned = chg * risk_sign
+    return "good" if aligned > 0 else "bad" if aligned < 0 else "warn"
+
+def short_state(s: str) -> str:
+    mapping = {
+        "PRESSURE UP":"PRESSURE UP", "PRESSURE DOWN":"PRESSURE DOWN", "SUPPORTIVE":"SUPPORT", "STRONG":"STRONG",
+        "WEAK":"WEAK", "PRESSURE":"PRESSURE", "MIXED":"MIXED"
+    }
+    return mapping.get(str(s), str(s)[:14])
+
+def action_statement(action: Dict[str, object]) -> str:
+    state = str(action.get("state", ""))
+    driver = str(action.get("primary_driver", ""))
+    if "RISK-OFF" in state:
+        return f"Risk-off pressure is active. Respect downside pressure until {driver} weakens or the confirming markets reverse."
+    if "RISK-ON" in state:
+        return f"Risk-on pressure is active. Upside is cleaner while internals, credit, and volatility keep confirming."
+    return "Market is mixed. Use the active cause and confirmation count before trusting direction."
+
+def chips(items: Iterable[str], kind: str = "") -> str:
+    css = "chip " + ("chip-good" if kind == "good" else "chip-bad" if kind == "bad" else "chip-warn" if kind == "warn" else "")
+    vals = [str(x) for x in items if str(x).strip()]
+    if not vals:
+        vals = ["Waiting for signal"]
+    return " ".join([f"<span class='{css}'>{v}</span>" for v in vals])
+
+def clean_card(title: str, main: str, sub: str = "", tone: str = ""):
+    with st.container(border=True):
+        st.markdown(f"<div class='card-title'>{title}</div>", unsafe_allow_html=True)
+        tone_class = tone if tone in ["good","bad","warn"] else ""
+        st.markdown(f"<div class='big-read {tone_class}'>{main}</div>", unsafe_allow_html=True)
+        if sub:
+            st.markdown(f"<div class='sub-read'>{sub}</div>", unsafe_allow_html=True)
+
+def small_card(title: str, main: str, sub: str = "", tone: str = ""):
+    with st.container(border=True):
+        st.markdown(f"<div class='card-title'>{title}</div>", unsafe_allow_html=True)
+        tone_class = tone if tone in ["good","bad","warn"] else ""
+        st.markdown(f"<div class='tile-main {tone_class}'>{main}</div>", unsafe_allow_html=True)
+        if sub:
+            st.markdown(f"<div class='muted'>{sub}</div>", unsafe_allow_html=True)
+
+def asset_row(sym: str) -> pd.Series | None:
+    if market.empty:
+        return None
+    rows = market[market.symbol == sym]
+    return None if rows.empty else rows.iloc[0]
+
+def render_asset_tile_v2(row: pd.Series, selected: str) -> bool:
+    is_sel = str(row.symbol) == selected
+    with st.container(border=True):
+        st.markdown(f"<div class='tile-caption'>{row.category}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='tile-main'>{row.symbol}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='tile-price'>{fmt_num(float(row.latest_close))}</div>", unsafe_allow_html=True)
+        tone = change_class(float(row.change_pct), int(row.risk_sign))
+        st.markdown(f"<div class='tile-foot {tone}'>{float(row.change_pct):+.2f}% · {short_state(row.state)}</div>", unsafe_allow_html=True)
+        return st.button("Selected" if is_sel else "Select", key=f"tile_select_{row.symbol}", use_container_width=True, type="primary" if is_sel else "secondary")
+
+def render_asset_strip(symbols: List[str], ncols: int = 4):
+    tile_df = market[market.symbol.isin(symbols)].copy()
+    if tile_df.empty:
+        st.info("No live tile data loaded yet.")
+        return
+    for row_start in range(0, len(tile_df), ncols):
+        cols = st.columns(ncols)
+        for col, (_, r) in zip(cols, tile_df.iloc[row_start:row_start+ncols].iterrows()):
+            with col:
+                if render_asset_tile_v2(r, st.session_state.selected_symbol):
+                    st.session_state.selected_symbol = str(r.symbol)
+                    st.rerun()
+
+def render_target_cards():
+    tb = target_board(market, action)
+    if tb.empty:
+        st.info("Targets unavailable until live data loads.")
+        return
+    cols = st.columns(4)
+    for i, (_, r) in enumerate(tb.head(8).iterrows()):
+        with cols[i % 4]:
+            tone = "good" if "Upside" in str(r.pressure) else "bad" if "Downside" in str(r.pressure) else "warn"
+            small_card(str(r.asset).split()[0], str(r.pressure), f"Score {r.score} · {r.state}", tone)
+
+def render_outcome_cards():
+    ob = outcome_board(action)
+    cols = st.columns(3)
+    for i, (_, r) in enumerate(ob.iterrows()):
+        with cols[i]:
+            with st.container(border=True):
+                st.markdown(f"<div class='card-title'>OUTCOME {i+1} · {r.probability}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='tile-main'>{r.outcome}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='muted'><b>Target:</b> {r.target}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='muted'><b>Confirm:</b> {r.confirm}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='muted'><b>Invalid:</b> {r.invalidate}</div>", unsafe_allow_html=True)
+
+def render_selected_panel():
+    read = asset_action(st.session_state.selected_symbol, market, causes)
+    st.markdown("<div class='section-title'>SELECTED ASSET ACTION PANEL</div>", unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+    with c1:
+        clean_card(read.get("title", "Selected"), read.get("now", "N/A"), f"Cause: {read.get('cause','N/A')}")
+    with c2:
+        small_card("TARGET", read.get("target", "N/A"), read.get("related", ""), "warn")
+    with c3:
+        small_card("CONFIRM", read.get("confirm", "N/A"), "What must agree", "good")
+    with c4:
+        small_card("INVALIDATE / AVOID", read.get("invalidate", "N/A"), read.get("avoid", ""), "bad")
+
+# Top command strip
+st.markdown("<div class='top-shell'><span class='mini-label'>LIVE ACTION COMMAND CENTER · SEARCH · CAUSE · TARGET · OUTCOME</span></div>", unsafe_allow_html=True)
+cmd_cols = st.columns([3.4, .72, .84, .78, .85, .74])
 with cmd_cols[0]:
-    global_query = st.text_input("Search everything", placeholder="NDX, QQQ, NVDA, internals, real estate, credit, gold, yields, oil", label_visibility="collapsed")
+    global_query = st.text_input("Search", placeholder="Search: QQQ, NDX, real estate, semis, credit, gold, yields, oil", label_visibility="collapsed")
 with cmd_cols[1]:
     st.metric("Local", now_et().strftime("%-I:%M %p"))
 with cmd_cols[2]:
     st.metric("Session", session_name())
 with cmd_cols[3]:
-    status = "LIVE" if not market.empty else "NO DATA"
-    st.metric("Data", status, f"{len(market)} series")
+    st.metric("Data", "LIVE" if not market.empty else "NO DATA", f"{len(market)} series")
 with cmd_cols[4]:
-    if st.button("Update now", use_container_width=True):
+    if st.button("Update", use_container_width=True):
         fetch_intraday.clear(); fetch_daily.clear(); fetch_headlines.clear(); st.rerun()
 with cmd_cols[5]:
     st.metric("Auto", "ON" if st.session_state.auto_refresh else "OFF", f"{st.session_state.refresh_interval}s")
@@ -687,140 +844,153 @@ with cmd_cols[5]:
 if global_query:
     page = "Search"
 
+# ------------------------- Pages -------------------------
 if page == "Action Console":
-    st.header("ACTION CONSOLE")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: render_metric_card("NOW", str(action["state"]), f"Quality: {action['quality']} | {action['confidence']}%")
-    with c2: render_metric_card("ACTIVE CAUSE", str(action["primary_driver"]), "Highest ranked live driver")
-    with c3: render_metric_card("PRESSURE", str(action["pressure_asset"]), "Most affected right now")
-    with c4: render_metric_card("TARGET PRESSURE", str(action["target_pressure"]), "Live directional pressure")
-    with c5: render_metric_card("CONFIRM / CONTRADICT", f"{action['confirmations']} / {action['contradictions']}", "Cross-market agreement")
+    st.markdown("<div class='section-title'>ACTION CONSOLE</div>", unsafe_allow_html=True)
+    score_tone = cls_for_score(float(action["scores"].get("Macro", 0)))
+    top_cause = causes[0] if causes else {"confirm": [], "contradict": [], "cause":"No data", "category":"N/A", "effect":"N/A", "target":"N/A", "affected":"N/A"}
 
-    st.subheader("Regime Meter Gauges")
+    h1, h2 = st.columns([1.25, 1])
+    with h1:
+        clean_card("NOW", str(action["state"]), action_statement(action), score_tone)
+    with h2:
+        clean_card("ACTIVE CAUSE", str(action["primary_driver"]), f"Quality {action['quality']} · Confidence {action['confidence']}% · {action['confirmations']}C/{action['contradictions']}X", "warn")
+
+    a1, a2, a3, a4 = st.columns(4)
+    with a1: small_card("PRESSURE ASSET", str(action["pressure_asset"]), "Most affected now", "bad" if "RISK-OFF" in str(action["state"]) else "good")
+    with a2: small_card("SUPPORT ASSET", str(action["support_asset"]), "Current defensive/supportive pocket", "good")
+    with a3: small_card("TARGET PRESSURE", str(action["target_pressure"]), "Current pull direction", "warn")
+    with a4: small_card("FUTURE RISK", next_events().iloc[0]["event"] if not next_events().empty else "No event", next_events().iloc[0]["time"] if not next_events().empty else "", "warn")
+
+    st.markdown("<div class='section-title'>REGIME GAUGES</div>", unsafe_allow_html=True)
     gcols = st.columns(5)
     for i, key in enumerate(["Macro", "AI", "Internals", "Liquidity", "Risk"]):
         with gcols[i]:
             score = float(action["scores"].get(key, 0))
             st.plotly_chart(make_gauge(key, score), use_container_width=True, config={"displayModeBar": False})
-            st.caption(regime_from_score(score))
+            st.caption(f"{regime_from_score(score)} · {score:.1f}")
 
-    st.subheader("Target Board")
-    st.dataframe(target_board(market, action), use_container_width=True, hide_index=True)
+    st.markdown("<div class='section-title'>TARGET BOARD</div>", unsafe_allow_html=True)
+    render_target_cards()
 
-    st.subheader("Outcome Board")
-    st.dataframe(outcome_board(action), use_container_width=True, hide_index=True)
+    st.markdown("<div class='section-title'>OUTCOME BOARD</div>", unsafe_allow_html=True)
+    render_outcome_cards()
 
-    st.subheader("Confirm / Invalidate / Avoid")
-    top_cause = causes[0] if causes else {}
-    cc1, cc2, cc3 = st.columns(3)
-    with cc1: render_metric_card("CONFIRM", " | ".join(top_cause.get("confirm", [])) or "Need confirmation", "Signals proving the read")
-    with cc2: render_metric_card("INVALIDATE", " | ".join(top_cause.get("contradict", [])) or "Opposite reclaim/rollover", "Signals canceling the read")
-    with cc3: render_metric_card("AVOID", "Weak score quality / mixed confirmations", "Do not chase when contradiction is high")
+    st.markdown("<div class='section-title'>CONFIRM · CONTRADICT · AVOID</div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        with st.container(border=True):
+            st.markdown("<div class='card-title'>CONFIRMING NOW</div>", unsafe_allow_html=True)
+            st.markdown(chips(top_cause.get("confirm", []), "good"), unsafe_allow_html=True)
+    with c2:
+        with st.container(border=True):
+            st.markdown("<div class='card-title'>CONTRADICTING NOW</div>", unsafe_allow_html=True)
+            st.markdown(chips(top_cause.get("contradict", []), "bad"), unsafe_allow_html=True)
+    with c3:
+        with st.container(border=True):
+            st.markdown("<div class='card-title'>AVOID</div>", unsafe_allow_html=True)
+            st.markdown(chips(["Chasing against location", "Weak score quality", "Mixed confirmations"], "warn"), unsafe_allow_html=True)
 
-    st.subheader("Live Market Pulse")
-    tile_df = market[market.symbol.isin(CORE_TILES)].copy()
-    for row_start in range(0, len(tile_df), 6):
-        cols = st.columns(6)
-        for col, (_, r) in zip(cols, tile_df.iloc[row_start:row_start+6].iterrows()):
-            with col:
-                if render_tile(r, st.session_state.selected_symbol):
-                    st.session_state.selected_symbol = str(r.symbol)
-                    st.rerun()
-    st.subheader("Selected Asset Action Read")
-    read = asset_action(st.session_state.selected_symbol, market, causes)
-    ac1, ac2, ac3 = st.columns(3)
-    with ac1: render_metric_card(read["title"], read["now"], f"Active cause: {read['cause']}")
-    with ac2: render_metric_card("TARGET", read["target"], f"Related: {read['related']}")
-    with ac3: render_metric_card("CONFIRM / INVALIDATE", f"Confirm: {read['confirm']}", f"Invalidate: {read['invalidate']}")
-    render_metric_card("AVOID", read["avoid"], "Use score quality as timing filter, not location replacement")
+    st.markdown("<div class='section-title'>LIVE MARKET PULSE</div>", unsafe_allow_html=True)
+    render_asset_strip(CORE_TILES, ncols=4)
+    render_selected_panel()
 
-elif page == "Live Market Pulse":
-    st.header("LIVE MARKET PULSE")
+    with st.expander("Detail tables", expanded=False):
+        st.dataframe(market, use_container_width=True, hide_index=True)
+
+elif page == "Live Pulse":
+    st.markdown("<div class='section-title'>LIVE MARKET PULSE</div>", unsafe_allow_html=True)
     cats = ["All", "Indexes", "AI / Tech", "Semiconductors", "Real Estate", "Sectors", "Sub-Sectors", "Bonds", "Dollar", "Commodities", "Currencies", "Crypto", "Credit", "Volatility", "Global"]
     cat = st.radio("Filter", cats, horizontal=True)
     data = market if cat == "All" else market[market.category == cat]
-    for row_start in range(0, len(data), 5):
-        cols = st.columns(5)
-        for col, (_, r) in zip(cols, data.iloc[row_start:row_start+5].iterrows()):
-            with col:
-                if render_tile(r, st.session_state.selected_symbol):
-                    st.session_state.selected_symbol = str(r.symbol); st.rerun()
-    st.subheader("Selected Asset Action Panel")
-    read = asset_action(st.session_state.selected_symbol, market, causes)
-    for k in ["now", "cause", "target", "confirm", "invalidate", "avoid", "related"]:
-        render_metric_card(k.upper(), read[k], None)
+    symbols = data.symbol.tolist()
+    render_asset_strip(symbols, ncols=4)
+    render_selected_panel()
 
 elif page == "Active Causes":
-    st.header("ACTIVE CAUSE ENGINE")
+    st.markdown("<div class='section-title'>ACTIVE CAUSE ENGINE</div>", unsafe_allow_html=True)
     for c in causes:
         with st.container(border=True):
-            st.subheader(f"{c['status']} — {c['cause']}")
-            cols = st.columns(4)
-            cols[0].metric("Category", str(c["category"]))
-            cols[1].metric("Severity", int(c["severity"]))
-            cols[2].metric("Confirmations", len(c.get("confirm", [])))
-            cols[3].metric("Contradictions", len(c.get("contradict", [])))
-            st.write("Affected:", c["affected"])
-            st.write("Effect:", c["effect"])
-            st.write("Target Pressure:", c["target"])
-            st.write("Confirm:", ", ".join(c.get("confirm", [])) or "None")
-            st.write("Contradict:", ", ".join(c.get("contradict", [])) or "None")
-    st.subheader("Headline / Catalyst Watch")
-    headlines = fetch_headlines()
-    if headlines.empty:
-        st.info("Headline watch unavailable or no current items returned. Market-data active causes remain live.")
-    else:
-        st.dataframe(headlines, use_container_width=True, hide_index=True)
+            t1, t2, t3, t4 = st.columns([1.2,.7,.7,.7])
+            t1.markdown(f"<div class='card-title'>{c['status']} · {c['category']}</div><div class='tile-main'>{c['cause']}</div>", unsafe_allow_html=True)
+            t2.metric("Severity", int(c["severity"]))
+            t3.metric("Confirms", len(c.get("confirm", [])))
+            t4.metric("Contradicts", len(c.get("contradict", [])))
+            st.markdown(f"<div class='muted'><b>Affected:</b> {c['affected']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='muted'><b>Effect:</b> {c['effect']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='muted'><b>Target:</b> {c['target']}</div>", unsafe_allow_html=True)
+            st.markdown(chips(c.get("confirm", []), "good") + chips(c.get("contradict", []), "bad"), unsafe_allow_html=True)
+    with st.expander("Headline / catalyst watch", expanded=False):
+        headlines = fetch_headlines()
+        if headlines.empty:
+            st.info("Headline watch unavailable or no current items returned. Market-data active causes remain live.")
+        else:
+            st.dataframe(headlines, use_container_width=True, hide_index=True)
 
 elif page == "Extended Hours":
-    st.header("NAS / QQQ EXTENDED HOURS")
+    st.markdown("<div class='section-title'>NAS / QQQ EXTENDED HOURS</div>", unsafe_allow_html=True)
     eh = extended_hours_read(intra)
-    st.dataframe(eh, use_container_width=True, hide_index=True)
-    st.caption("Tracks pre-market, regular NY, after-hours, overnight, and latest 1H/4H closes where Yahoo/yfinance feed provides intraday bars.")
+    if eh.empty:
+        st.warning("Extended-hours data not loaded yet.")
+    else:
+        st.dataframe(eh, use_container_width=True, hide_index=True)
+    st.caption("Tracks pre-market, regular NY, after-hours, overnight, and latest 1H/4H closes where feed provides intraday bars.")
 
 elif page in ["Real Estate", "Sectors", "Sub-Sectors", "Currencies", "Credit", "Volatility", "Global Markets"]:
     cat_map = {"Global Markets":"Global"}
     cat = cat_map.get(page, page)
-    st.header(page.upper())
+    st.markdown(f"<div class='section-title'>{page.upper()}</div>", unsafe_allow_html=True)
     part = market[market.category == cat].copy()
     if not part.empty:
-        avg = part.score.mean()
-        pos = (part.score > 0).mean() * 100
+        avg = float(part.score.mean())
+        pos = float((part.score > 0).mean() * 100)
         c1, c2, c3 = st.columns(3)
-        c1.metric("Category Score", f"{avg:.1f}")
+        c1.metric("Category Score", f"{avg:.1f}", regime_from_score(avg))
         c2.metric("Positive Participation", f"{pos:.0f}%")
         c3.metric("Loaded Series", len(part))
-        st.dataframe(part[["symbol","name","latest_close","change_pct","score","state","role"]], use_container_width=True, hide_index=True)
+        st.markdown("<div class='section-title'>LIVE TILES</div>", unsafe_allow_html=True)
+        render_asset_strip(part.symbol.tolist(), ncols=4)
+        with st.expander("Series table", expanded=False):
+            st.dataframe(part[["symbol","name","latest_close","change_pct","score","state","role"]], use_container_width=True, hide_index=True)
     else:
         st.warning("No live series loaded for this category.")
 
 elif page == "Events":
-    st.header("EVENT RISK")
-    st.dataframe(next_events(), use_container_width=True, hide_index=True)
+    st.markdown("<div class='section-title'>EVENT RISK</div>", unsafe_allow_html=True)
+    ev = next_events()
+    cols = st.columns(3)
+    for i, (_, r) in enumerate(ev.iterrows()):
+        with cols[i % 3]:
+            small_card(str(r.event), f"{r.days} days", f"{r.time} · {r.impact}", "warn" if r.impact == "HIGH" else "")
 
 elif page == "Search":
     q = (global_query or st.text_input("Search", placeholder="NDX, real estate, gold, credit, semis, yields")).lower().strip()
-    st.header(f"ACTION SEARCH: {q.upper() if q else ''}")
+    st.markdown(f"<div class='section-title'>ACTION SEARCH {q.upper() if q else ''}</div>", unsafe_allow_html=True)
     if q:
         mask = market.apply(lambda r: q in str(r.symbol).lower() or q in str(r["name"]).lower() or q in str(r.category).lower() or q in str(r.role).lower(), axis=1)
         res = market[mask]
         if not res.empty:
             selected_sym = str(res.iloc[0].symbol)
             read = asset_action(selected_sym, market, causes)
-            render_metric_card("ACTION READ", read["now"], f"Cause: {read['cause']}")
-            render_metric_card("TARGET", read["target"], f"Related: {read['related']}")
-            render_metric_card("CONFIRM", read["confirm"], None)
-            render_metric_card("INVALIDATE / AVOID", f"{read['invalidate']} | {read['avoid']}", None)
-            st.subheader("Direct matches")
-            st.dataframe(res[["symbol","name","category","latest_close","change_pct","score","state","role"]], use_container_width=True, hide_index=True)
+            c1, c2 = st.columns([1,1])
+            with c1: clean_card("ACTION READ", read["now"], f"Cause: {read['cause']}")
+            with c2: clean_card("TARGET", read["target"], f"Related: {read['related']}", "warn")
+            c3, c4, c5 = st.columns(3)
+            with c3: small_card("CONFIRM", read["confirm"], "", "good")
+            with c4: small_card("INVALIDATE", read["invalidate"], "", "bad")
+            with c5: small_card("AVOID", read["avoid"], "", "warn")
+            st.markdown("<div class='section-title'>RELATED MATCHES</div>", unsafe_allow_html=True)
+            render_asset_strip(res.symbol.tolist(), ncols=4)
+            with st.expander("Direct match table", expanded=False):
+                st.dataframe(res[["symbol","name","category","latest_close","change_pct","score","state","role"]], use_container_width=True, hide_index=True)
         else:
             st.info("No direct match. Try QQQ, NDX, real estate, semis, gold, yields, credit, volatility, oil.")
 
 elif page == "Data Health":
-    st.header("DATA HEALTH")
+    st.markdown("<div class='section-title'>DATA HEALTH</div>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Loaded Series", len(market))
-    c2.metric("Last Local Time", now_et().strftime("%-I:%M %p"))
+    c2.metric("Local Time", now_et().strftime("%-I:%M %p"))
     c3.metric("Session", session_name())
     c4.metric("Auto Re-run", "ON" if st.session_state.auto_refresh else "OFF")
     st.write("Live source: yfinance prices with pre/post where available; public Google News RSS for headline watch; no FRED; no demo logic.")
@@ -831,5 +1001,5 @@ elif page == "Data Health":
         st.success("All configured symbols loaded.")
 
 elif page == "Raw Tables":
-    st.header("RAW TABLES")
+    st.markdown("<div class='section-title'>RAW TABLES</div>", unsafe_allow_html=True)
     st.dataframe(market, use_container_width=True, hide_index=True)
