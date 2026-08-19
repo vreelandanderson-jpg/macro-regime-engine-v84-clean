@@ -1,42 +1,27 @@
-# Macro Regime Engine v8.8 — All-Session NAS Engine
+# Macro Regime Engine v8.9
 
-Clean Streamlit repo package.
+Universal Instruments + Order Flow Engine.
 
-## v8.8 fix
+## Core focus
 
-NDX/NAS live tracking is no longer treated as NY-cash-only.
+- Universal instrument map for every searched asset
+- Cash / spot / ETF / futures / options proxy / sector / related stocks / credit / volatility / currency / commodity layers
+- Order-flow proxy card
+- Score, change %, score quality, reason, active cause, target pressure, confirm / contradict / avoid
+- Global session engine: Asia, London, US pre-market, NY cash, after-hours, Globex/futures, crypto 24/7
+- Gauges, selectable live tiles, action console
 
-Instrument rules:
+## Deploy files
 
-- `NQ=F` = primary NAS live driver for Asia, London, Globex, overnight, and non-cash sessions.
-- `QQQ` = tradable US pre-market and after-hours NAS proxy.
-- `^NDX` = official NY cash index reference only.
-
-## Included
-
-- Action Console
-- Active Cause Engine
-- Full universe coverage
-- Real estate / housing
-- Healthcare / science / biotech / pharma
-- Global session map
-- NAS all-session driver panel
-- NAS / QQQ / NQ session range panel
-- Selectable live tiles
-- Gauges
-- Toronto / Eastern 12-hour time
-- No FRED
-- No demo logic
-
-## GitHub upload files
-
-Upload only these files to Streamlit/GitHub:
+Upload these root files to GitHub:
 
 - `app.py`
 - `requirements.txt`
 - `README.md`
 - `.gitignore`
 
-## Deploy
+Then redeploy/reboot Streamlit Cloud.
 
-Main file path: `app.py`
+## Data note
+
+Free public feeds provide price/volume and delayed/limited options chain information. True Level II order flow, live options flow, and professional depth require a broker/data feed such as IBKR, Tradier, Polygon, dxFeed, Rithmic, CQG, or similar.
