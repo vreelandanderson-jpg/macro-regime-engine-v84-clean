@@ -1,8 +1,8 @@
-# Macro Regime Engine v9.5 — Persistent Edit Sync + Volume Repair
+# Macro Regime Engine v9.6 — Persistent Edit Sync + Volume Repair
 
 This build keeps the synchronized ≤25-second data architecture, universal instrument universe, persistent strip-card presentation, pharma / healthcare, defense / aero, Geo / Global, order-flow proxy, options pressure, raw-data diagnostics, and Events calendar.
 
-## v9.5 changes
+## v9.6 changes
 
 - Open strip cards remain open through automatic refresh and manual UPDATE. They close only when the user closes that strip.
 - `EDIT / FORMAT THIS INSTRUMENT` now writes to a persistent UI display-override layer keyed by symbol.
@@ -16,7 +16,7 @@ This build keeps the synchronized ≤25-second data architecture, universal inst
 
 ## Volume repair
 
-The previous build relied on the most recent 1-minute `Volume` cell, which may be zero/unreported. v9.5 replaces that behavior with:
+The previous build relied on the most recent 1-minute `Volume` cell, which may be zero/unreported. v9.6 replaces that behavior with:
 
 - `volume_1m`: most recent valid non-zero minute volume.
 - `session_volume`: cumulative valid volume across the fetched session.
@@ -30,3 +30,9 @@ The previous build relied on the most recent 1-minute `Volume` cell, which may b
 Cash/reference series use explicit labeled proxies where practical, including Nasdaq cash → NQ futures, S&P cash → ES futures, Dow cash → YM futures, Russell cash → RTY futures, DXY → UUP, and 10Y yield → TLT. Volatility/FX reference series also use clearly labeled liquid proxy volume when native volume is unavailable.
 
 The Flow Tracker and dashboard Order Flow panel now expose relative-volume activity, volume delta, session volume, and volume source from the synchronized snapshot. This remains a public-feed proxy; true Level II/order-book data requires a broker-grade order-flow provider.
+
+
+## v9.6 edit safety fix
+- Score/change format buttons now use pre-render callbacks, avoiding StreamlitAPIException from modifying selectbox-owned Session State after instantiation.
+- Score edits continue to persist as display overrides and rerender the expanded strip card immediately.
+- Reset override action is callback-safe as well.

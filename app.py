@@ -742,29 +742,68 @@ def save_symbol_display_overrides(symbol: str, baseline: pd.Series, edited: pd.S
     return changed
 
 
+def _set_global_score_format(value: str) -> None:
+    # Widget callbacks run before the script is rebuilt. This is intentionally
+    # used instead of mutating a selectbox-owned session_state key after that
+    # selectbox has already been instantiated in the current run.
+    st.session_state["global_score_format"] = value
+
+
+def _set_global_change_format(value: str) -> None:
+    st.session_state["global_change_format"] = value
+
+
+def _reset_symbol_display_overrides(symbol: str, editor_key: str) -> None:
+    store = dict(_display_override_store())
+    store.pop(symbol, None)
+    st.session_state.instrument_display_overrides = store
+    # Callback executes before the next render, so removing editor state here is safe.
+    st.session_state.pop(editor_key, None)
+
+
 def _format_buttons(key_prefix: str) -> None:
     st.caption("Display format · applies globally across every module")
     a, b, c, d, e = st.columns(5)
     with a:
-        if st.button("Score %", key=f"{key_prefix}_score_pct"):
-            st.session_state.global_score_format = "Percentage"
-            st.rerun()
+        st.button(
+            "Score %",
+            key=f"{key_prefix}_score_pct",
+            on_click=_set_global_score_format,
+            args=("Percentage",),
+            use_container_width=True,
+        )
     with b:
-        if st.button("Score dec", key=f"{key_prefix}_score_dec"):
-            st.session_state.global_score_format = "Decimal"
-            st.rerun()
+        st.button(
+            "Score dec",
+            key=f"{key_prefix}_score_dec",
+            on_click=_set_global_score_format,
+            args=("Decimal",),
+            use_container_width=True,
+        )
     with c:
-        if st.button("Score whole", key=f"{key_prefix}_score_whole"):
-            st.session_state.global_score_format = "Whole"
-            st.rerun()
+        st.button(
+            "Score whole",
+            key=f"{key_prefix}_score_whole",
+            on_click=_set_global_score_format,
+            args=("Whole",),
+            use_container_width=True,
+        )
     with d:
-        if st.button("Change %", key=f"{key_prefix}_chg_pct"):
-            st.session_state.global_change_format = "Percentage"
-            st.rerun()
+        st.button(
+            "Change %",
+            key=f"{key_prefix}_chg_pct",
+            on_click=_set_global_change_format,
+            args=("Percentage",),
+            use_container_width=True,
+        )
     with e:
-        if st.button("Change dec", key=f"{key_prefix}_chg_dec"):
-            st.session_state.global_change_format = "Decimal"
-            st.rerun()
+        st.button(
+            "Change dec",
+            key=f"{key_prefix}_chg_dec",
+            on_click=_set_global_change_format,
+            args=("Decimal",),
+            use_container_width=True,
+        )
 
 
 def render_editable_table(df: pd.DataFrame, key: str, *, disabled: list[str] | None = None) -> pd.DataFrame:
@@ -888,14 +927,14 @@ def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[st
                     st.rerun()
                 if _display_override_store().get(symbol):
                     st.caption("Display override active for this instrument. It will survive refresh until reset.")
-                    if st.button("RESET DISPLAY OVERRIDES", key=f"{key_prefix}_reset_{safe_symbol_key}", use_container_width=True):
-                        store = _display_override_store()
-                        store.pop(symbol, None)
-                        st.session_state.instrument_display_overrides = store
-                        editor_key = f"{key_prefix}_row_editor_{safe_symbol_key}"
-                        if editor_key in st.session_state:
-                            del st.session_state[editor_key]
-                        st.rerun()
+                    editor_key = f"{key_prefix}_row_editor_{safe_symbol_key}"
+                    st.button(
+                        "RESET DISPLAY OVERRIDES",
+                        key=f"{key_prefix}_reset_{safe_symbol_key}",
+                        use_container_width=True,
+                        on_click=_reset_symbol_display_overrides,
+                        args=(symbol, editor_key),
+                    )
 
 
 def _first_friday(year: int, month: int) -> date:
@@ -965,7 +1004,7 @@ def health_card(snapshot_age: int) -> str:
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.5</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.6</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -999,10 +1038,13 @@ if "selected_symbol" not in st.session_state:
     st.session_state.selected_symbol = "NQ=F"
 if "last_manual_update" not in st.session_state:
     st.session_state.last_manual_update = 0.0
+# Defaults are created before the sidebar widgets are instantiated.
+st.session_state.setdefault("global_score_format", "Percentage")
+st.session_state.setdefault("global_change_format", "Percentage")
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v95")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v96")
 
 # One synchronized universe fetch drives every module. No page has its own independent data clock.
 raw_universe = fetch_universe_snapshot(tuple(SYMBOLS))
