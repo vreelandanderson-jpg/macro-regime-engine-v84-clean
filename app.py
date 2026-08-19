@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v9.4"
+APP_VERSION = "v9.5"
 MAX_DATA_AGE_SECONDS = 25
 CACHE_TTL_SECONDS = 20
 DEFAULT_REFRESH_SECONDS = 20
@@ -112,7 +112,7 @@ html, body, [data-testid="stAppViewContainer"]{
 [data-testid="stDataFrame"]{font-size:11px!important;}
 [data-testid="stExpander"]{border:1px solid #173957!important;border-radius:11px!important;background:#06131f!important;}
 [data-testid="stPopover"] button{min-height:32px!important;}
-/* v9.4 persistent interactive strip cards */
+/* v9.5 persistent interactive strip cards + live volume diagnostics */
 [data-testid="stExpander"]{margin:.32rem 0!important;border:1px solid #173957!important;border-radius:13px!important;background:linear-gradient(90deg,rgba(7,24,39,.98),rgba(5,14,25,.98))!important;overflow:hidden;box-shadow:0 0 12px rgba(0,0,0,.20);}
 [data-testid="stExpander"]:hover{border-color:#2a84b8!important;box-shadow:0 0 14px rgba(49,198,255,.10);}
 [data-testid="stExpander"] summary{padding:.62rem .8rem!important;min-height:42px!important;}
@@ -253,6 +253,25 @@ ALIASES = {
 CORE = ["NQ=F", "ES=F", "QQQ", "SPY", "DX-Y.NYB", "^TNX", "^VIX", "GC=F", "CL=F", "BTC-USD", "NVDA", "SMH", "RSP", "HYG"]
 
 
+
+# Instruments that do not publish reliable native traded volume use a clearly-labelled
+# liquid proxy. The displayed value is never silently represented as native volume.
+VOLUME_PROXY_MAP = {
+    "^NDX": "NQ=F",
+    "^GSPC": "ES=F",
+    "^DJI": "YM=F",
+    "^RUT": "RTY=F",
+    "DX-Y.NYB": "UUP",
+    "^TNX": "TLT",
+    "^VIX": "SPY",
+    "^VVIX": "SPY",
+    "^VIX9D": "SPY",
+    "EURUSD=X": "UUP",
+    "JPY=X": "UUP",
+    "CAD=X": "UUP",
+}
+
+
 def now_et() -> datetime:
     return datetime.now(TZ)
 
@@ -298,8 +317,60 @@ def fallback_row(sym: str, snapshot_iso: str) -> dict:
     pct = ((seed % 31) - 15) / 10
     return {
         "symbol": sym, "latest_close": float(base), "change_pct": float(pct), "session_pct": float(pct * 1.1),
-        "volume": float(seed * 1000), "updated": snapshot_iso, "source": "fallback", "source_ok": False,
+        # Fallback rows must never manufacture traded volume.
+        "volume": np.nan, "volume_1m": np.nan, "session_volume": np.nan,
+        "relative_volume": np.nan, "volume_delta_pct": np.nan,
+        "volume_source": "N/A · fallback", "volume_proxy_symbol": "",
+        "updated": snapshot_iso, "source": "fallback", "source_ok": False,
     }
+
+
+def _volume_metrics(volume: pd.Series) -> dict:
+    """Return robust volume fields without treating a zero latest bar as zero activity."""
+    if volume is None or len(volume) == 0:
+        return {"volume_1m": np.nan, "session_volume": np.nan, "relative_volume": np.nan, "volume_delta_pct": np.nan}
+    v = pd.to_numeric(volume, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    positive = v[v > 0]
+    if positive.empty:
+        return {"volume_1m": np.nan, "session_volume": np.nan, "relative_volume": np.nan, "volume_delta_pct": np.nan}
+    latest = float(positive.iloc[-1])
+    session = float(positive.sum())
+    prior_window = positive.iloc[-21:-1] if len(positive) > 1 else pd.Series(dtype=float)
+    baseline = float(prior_window.median()) if len(prior_window) else np.nan
+    relative = float(latest / baseline) if baseline and np.isfinite(baseline) and baseline > 0 else np.nan
+    previous = float(positive.iloc[-2]) if len(positive) > 1 else np.nan
+    delta = ((latest / previous) - 1.0) * 100.0 if previous and np.isfinite(previous) and previous > 0 else np.nan
+    return {"volume_1m": latest, "session_volume": session, "relative_volume": relative, "volume_delta_pct": delta}
+
+
+def _apply_volume_proxies(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill unavailable native volume from an explicit proxy and label the source."""
+    out = df.copy()
+    if out.empty or "symbol" not in out.columns:
+        return out
+    by_symbol = {str(r["symbol"]): r for _, r in out.iterrows()}
+    metric_cols = ["volume_1m", "session_volume", "relative_volume", "volume_delta_pct"]
+    for idx, row in out.iterrows():
+        native = row.get("session_volume", np.nan)
+        if pd.notna(native) and float(native) > 0:
+            out.at[idx, "volume"] = float(native)
+            out.at[idx, "volume_source"] = "Actual"
+            out.at[idx, "volume_proxy_symbol"] = ""
+            continue
+        sym = str(row.get("symbol", ""))
+        proxy_sym = VOLUME_PROXY_MAP.get(sym)
+        proxy = by_symbol.get(proxy_sym) if proxy_sym else None
+        if proxy is not None and pd.notna(proxy.get("session_volume", np.nan)) and float(proxy.get("session_volume", 0)) > 0:
+            for col in metric_cols:
+                out.at[idx, col] = proxy.get(col, np.nan)
+            out.at[idx, "volume"] = proxy.get("session_volume", np.nan)
+            out.at[idx, "volume_source"] = f"Proxy · {proxy_sym}"
+            out.at[idx, "volume_proxy_symbol"] = proxy_sym
+        else:
+            out.at[idx, "volume"] = np.nan
+            out.at[idx, "volume_source"] = "N/A"
+            out.at[idx, "volume_proxy_symbol"] = proxy_sym or ""
+    return out
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
@@ -321,7 +392,7 @@ def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
                     if frame.empty:
                         raise ValueError("empty")
                     close = frame["Close"].dropna()
-                    volume = frame["Volume"].dropna() if "Volume" in frame else pd.Series(dtype=float)
+                    volume = frame["Volume"] if "Volume" in frame else pd.Series(dtype=float)
                     if close.empty:
                         raise ValueError("no close")
                     last = float(close.iloc[-1])
@@ -329,18 +400,21 @@ def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
                     first = float(close.iloc[0])
                     pct = ((last / prev) - 1) * 100 if prev else 0.0
                     session_pct = ((last / first) - 1) * 100 if first else 0.0
+                    vm = _volume_metrics(volume)
                     rows.append({
                         "symbol": sym, "latest_close": last, "change_pct": pct, "session_pct": session_pct,
-                        "volume": float(volume.iloc[-1]) if len(volume) else 0.0, "updated": snapshot_iso,
-                        "source": "yfinance", "source_ok": True,
+                        "volume": vm["session_volume"], **vm,
+                        "volume_source": "Actual" if pd.notna(vm["session_volume"]) else "N/A",
+                        "volume_proxy_symbol": "",
+                        "updated": snapshot_iso, "source": "yfinance", "source_ok": True,
                     })
                 except Exception:
                     rows.append(fallback_row(sym, snapshot_iso))
-            return pd.DataFrame(rows)
+            return _apply_volume_proxies(pd.DataFrame(rows))
         except Exception:
             pass
     snapshot_iso = now_et().isoformat()
-    return pd.DataFrame([fallback_row(sym, snapshot_iso) for sym in symbols])
+    return _apply_volume_proxies(pd.DataFrame([fallback_row(sym, snapshot_iso) for sym in symbols]))
 
 
 def score_for(sym: str, pct: float, category: str = "") -> float:
@@ -549,8 +623,12 @@ def _display_value(key: str, value) -> str:
             return f"{float(value):+.4f}%"
         if key == "score":
             return format_score(float(value))
-        if key == "volume":
+        if key in {"volume", "volume_1m", "session_volume"}:
             return f"{float(value):,.0f}"
+        if key == "relative_volume":
+            return f"{float(value):.2f}×"
+        if key == "volume_delta_pct":
+            return f"{float(value):+.2f}%"
         return short_num(float(value))
     if isinstance(value, (np.integer, int)):
         return f"{int(value):,}"
@@ -587,9 +665,106 @@ def _table_column_config(columns: list[str]) -> dict:
         elif low in {"change_pct", "session_pct", "δ %", "change %", "change"}:
             fmt = "%.4f%%" if change_mode == "Percentage" else "%.6f"
             cfg[col] = st.column_config.NumberColumn(str(col), format=fmt)
+        elif low in {"volume", "volume_1m", "session_volume"}:
+            cfg[col] = st.column_config.NumberColumn(str(col), format="%.0f")
+        elif low == "relative_volume":
+            cfg[col] = st.column_config.NumberColumn(str(col), format="%.2f×")
+        elif low == "volume_delta_pct":
+            cfg[col] = st.column_config.NumberColumn(str(col), format="%+.2f%%")
         elif low in {"age_sec", "age sec"}:
             cfg[col] = st.column_config.NumberColumn(str(col), format="%d")
     return cfg
+
+
+def _display_override_store() -> dict:
+    if "instrument_display_overrides" not in st.session_state:
+        st.session_state.instrument_display_overrides = {}
+    return st.session_state.instrument_display_overrides
+
+
+def apply_row_display_overrides(row: pd.Series) -> pd.Series:
+    """Apply persistent UI-only overrides for a symbol without mutating the feed snapshot."""
+    effective = row.copy()
+    symbol = str(row.get("symbol", ""))
+    overrides = _display_override_store().get(symbol, {})
+    for key, value in overrides.items():
+        if key in effective.index:
+            effective[key] = value
+    return effective
+
+
+def apply_df_display_overrides(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if out.empty or "symbol" not in out.columns:
+        return out
+    for idx, row in out.iterrows():
+        effective = apply_row_display_overrides(row)
+        for col in out.columns:
+            if col in effective.index:
+                out.at[idx, col] = effective[col]
+    return out
+
+
+def save_symbol_display_overrides(symbol: str, baseline: pd.Series, edited: pd.Series, columns: list[str]) -> bool:
+    """Persist changed display fields for a symbol. Returns True when state changed."""
+    store = _display_override_store()
+    current = dict(store.get(symbol, {}))
+    changed = False
+    changed_cols: set[str] = set()
+    for col in columns:
+        if col == "symbol" or col not in edited.index:
+            continue
+        new_val = edited[col]
+        old_val = baseline.get(col, np.nan)
+        same = False
+        try:
+            same = (pd.isna(new_val) and pd.isna(old_val)) or (new_val == old_val)
+        except Exception:
+            same = str(new_val) == str(old_val)
+        if not same:
+            if current.get(col, object()) != new_val:
+                current[col] = new_val
+                changed = True
+                changed_cols.add(col)
+    if changed:
+        # Keep score-dependent display fields coherent. Manual state/quality edits still win.
+        if "score" in changed_cols:
+            try:
+                score = float(current["score"])
+                if "state" not in changed_cols:
+                    current["state"] = state_for(score)
+                if "quality" not in changed_cols:
+                    current["quality"] = quality_for(score)
+            except Exception:
+                pass
+        store[symbol] = current
+        st.session_state.instrument_display_overrides = store
+    return changed
+
+
+def _format_buttons(key_prefix: str) -> None:
+    st.caption("Display format · applies globally across every module")
+    a, b, c, d, e = st.columns(5)
+    with a:
+        if st.button("Score %", key=f"{key_prefix}_score_pct"):
+            st.session_state.global_score_format = "Percentage"
+            st.rerun()
+    with b:
+        if st.button("Score dec", key=f"{key_prefix}_score_dec"):
+            st.session_state.global_score_format = "Decimal"
+            st.rerun()
+    with c:
+        if st.button("Score whole", key=f"{key_prefix}_score_whole"):
+            st.session_state.global_score_format = "Whole"
+            st.rerun()
+    with d:
+        if st.button("Change %", key=f"{key_prefix}_chg_pct"):
+            st.session_state.global_change_format = "Percentage"
+            st.rerun()
+    with e:
+        if st.button("Change dec", key=f"{key_prefix}_chg_dec"):
+            st.session_state.global_change_format = "Decimal"
+            st.rerun()
 
 
 def render_editable_table(df: pd.DataFrame, key: str, *, disabled: list[str] | None = None) -> pd.DataFrame:
@@ -615,7 +790,7 @@ def strip_summary(row: pd.Series) -> str:
 
 
 def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[str] | None = None) -> None:
-    """Persistent strip cards: open state survives every timed/manual refresh until the user closes it."""
+    """Persistent strip cards. Open state and display edits survive timed/manual refreshes."""
     if view.empty:
         st.info("No instruments match this filter.")
         return
@@ -627,30 +802,43 @@ def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[st
         key=f"{key_prefix}_view_mode",
         label_visibility="collapsed",
     )
-    if mode in {"Editable Table", "Raw Table"}:
-        cols = raw_columns or [c for c in view.columns if not str(c).startswith("_")]
-        cols = [c for c in cols if c in view.columns]
-        if mode == "Editable Table":
-            st.caption("Editable working table · display edits are local and do not overwrite the synchronized market feed.")
-            render_editable_table(view[cols].copy(), f"{key_prefix}_editable_table")
-        else:
-            st.dataframe(
-                view[cols],
-                use_container_width=True,
-                hide_index=True,
-                column_config=_table_column_config(cols),
-            )
+    cols = raw_columns or [c for c in view.columns if not str(c).startswith("_")]
+    cols = [c for c in cols if c in view.columns]
+
+    if mode == "Editable Table":
+        st.caption("Editable display table · edits persist through refresh and immediately propagate back into the matching strip card. Live feed values remain untouched underneath.")
+        effective = apply_df_display_overrides(view[cols].copy())
+        edited = render_editable_table(effective, f"{key_prefix}_editable_table", disabled=["symbol"] if "symbol" in cols else [])
+        any_change = False
+        if "symbol" in effective.columns:
+            for i in range(min(len(effective), len(edited))):
+                symbol = str(effective.iloc[i]["symbol"])
+                if save_symbol_display_overrides(symbol, effective.iloc[i], edited.iloc[i], cols):
+                    any_change = True
+        if any_change:
+            st.rerun()
+        return
+
+    if mode == "Raw Table":
+        st.caption("Raw synchronized feed view · display overrides are intentionally not applied here.")
+        st.dataframe(
+            view[cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config=_table_column_config(cols),
+        )
         return
 
     st.markdown(
         "<div class='strip-toolbar'>"
-        "<span class='strip-pill'>OPEN STATE PERSISTS THROUGH REFRESH</span>"
-        "<span class='strip-pill'>NO FIELDS REMOVED</span>"
-        "<span class='strip-pill'>EDITABLE + RAW TABLES AVAILABLE</span>"
+        "<span class='strip-pill'>OPEN UNTIL YOU CLOSE IT</span>"
+        "<span class='strip-pill'>EDITS PERSIST THROUGH REFRESH</span>"
+        "<span class='strip-pill'>RAW FEED REMAINS AUDITABLE</span>"
         "</div>",
         unsafe_allow_html=True,
     )
-    for idx, (_, row) in enumerate(view.iterrows()):
+    for idx, (_, source_row) in enumerate(view.iterrows()):
+        row = apply_row_display_overrides(source_row)
         symbol = str(row.get("symbol", "—"))
         safe_symbol_key = "".join(ch if ch.isalnum() else "_" for ch in symbol)
         open_key = f"strip_open__{key_prefix}__{safe_symbol_key}"
@@ -679,20 +867,35 @@ def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[st
 
             fields = [(str(k), row[k]) for k in view.columns if not str(k).startswith("_")]
             cells = ["<div class='detail-grid'>"]
-            for key, value in fields:
-                label = key.replace("_", " ")
+            for field_key, value in fields:
+                label = field_key.replace("_", " ")
                 cells.append(
                     f"<div class='detail-cell'><div class='detail-key'>{label}</div>"
-                    f"<div class='detail-val'>{_display_value(key, value)}</div></div>"
+                    f"<div class='detail-val'>{_display_value(field_key, value)}</div></div>"
                 )
             cells.append("</div>")
             st.markdown("".join(cells), unsafe_allow_html=True)
 
-            table_cols = raw_columns or [c for c in view.columns if not str(c).startswith("_")]
-            table_cols = [c for c in table_cols if c in view.columns]
             with st.popover("EDIT / FORMAT THIS INSTRUMENT", use_container_width=True):
-                one_row = pd.DataFrame([{c: row.get(c) for c in table_cols}])
-                render_editable_table(one_row, f"{key_prefix}_row_editor_{safe_symbol_key}")
+                _format_buttons(f"{key_prefix}_{safe_symbol_key}")
+                one_row = pd.DataFrame([{c: row.get(c) for c in cols}])
+                edited = render_editable_table(
+                    one_row,
+                    f"{key_prefix}_row_editor_{safe_symbol_key}",
+                    disabled=["symbol"] if "symbol" in cols else [],
+                )
+                if len(edited) and save_symbol_display_overrides(symbol, row, edited.iloc[0], cols):
+                    st.rerun()
+                if _display_override_store().get(symbol):
+                    st.caption("Display override active for this instrument. It will survive refresh until reset.")
+                    if st.button("RESET DISPLAY OVERRIDES", key=f"{key_prefix}_reset_{safe_symbol_key}", use_container_width=True):
+                        store = _display_override_store()
+                        store.pop(symbol, None)
+                        st.session_state.instrument_display_overrides = store
+                        editor_key = f"{key_prefix}_row_editor_{safe_symbol_key}"
+                        if editor_key in st.session_state:
+                            del st.session_state[editor_key]
+                        st.rerun()
 
 
 def _first_friday(year: int, month: int) -> date:
@@ -762,7 +965,7 @@ def health_card(snapshot_age: int) -> str:
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.4</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.5</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -788,7 +991,7 @@ def render_sidebar() -> tuple[str, bool, int]:
                 key="global_change_format",
                 help="Applies everywhere live change/session values are displayed.",
             )
-            st.caption("Formatting is global across all modules, not page-specific.")
+            st.caption("Formatting is global across all modules. The same controls are also available inside every instrument editor.")
         return page, auto, int(interval)
 
 
@@ -799,7 +1002,7 @@ if "last_manual_update" not in st.session_state:
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v94")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v95")
 
 # One synchronized universe fetch drives every module. No page has its own independent data clock.
 raw_universe = fetch_universe_snapshot(tuple(SYMBOLS))
@@ -904,19 +1107,23 @@ if page == "Dashboard":
             c1, c2, c3 = st.columns(3, gap="small")
             pressure = "Seller-led" if selected["score"] < -30 else "Buyer-led" if selected["score"] > 30 else "Balanced"
             absorption = "Weak" if selected["score"] < -45 else "Strong" if selected["score"] > 45 else "Mixed"
+            rv = float(selected.get("relative_volume", np.nan)) if pd.notna(selected.get("relative_volume", np.nan)) else np.nan
+            vd = float(selected.get("volume_delta_pct", np.nan)) if pd.notna(selected.get("volume_delta_pct", np.nan)) else np.nan
+            volume_activity = "N/A" if pd.isna(rv) else "Elevated" if rv >= 1.35 else "Thin" if rv < 0.70 else "Normal"
+            volume_delta_text = "N/A" if pd.isna(vd) else f"{vd:+.1f}%"
             opt = "Put pressure" if selected["score"] < -30 else "Call support" if selected["score"] > 30 else "Neutral"
             with c1:
                 st.markdown(
                     f"<div class='card compact'><div class='section-title'>Order Flow</div>"
                     f"<div class='rowline'><span>Pressure</span><b class='{color_for(selected['score'])}'>{pressure}</b></div>"
-                    f"<div class='rowline'><span>Liquidity</span><b>Two-sided</b></div>"
-                    f"<div class='rowline'><span>Absorption</span><b>{absorption}</b></div>"
-                    f"<div class='rowline'><span>Delta</span><b>{'Negative' if selected['score'] < 0 else 'Positive'}</b></div></div>",
+                    f"<div class='rowline'><span>Rel volume</span><b>{volume_activity}{'' if pd.isna(rv) else f' · {rv:.2f}×'}</b></div>"
+                    f"<div class='rowline'><span>Volume Δ</span><b>{volume_delta_text}</b></div>"
+                    f"<div class='rowline'><span>Absorption</span><b>{absorption}</b></div></div>",
                     unsafe_allow_html=True,
                 )
                 with st.popover("Open flow", use_container_width=True):
                     st.write("Flow proxy uses synchronized price, volume, breadth and related-asset agreement from the active snapshot.")
-                    mini_cols = ["symbol", "change_pct", "score", "state"]
+                    mini_cols = ["symbol", "change_pct", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "score", "state"]
                     st.dataframe(rel_df[mini_cols].head(10), use_container_width=True, hide_index=True, column_config=_table_column_config(mini_cols))
             with c2:
                 st.markdown(
@@ -1043,13 +1250,16 @@ elif page == "Instruments":
     if inst_search:
         q = inst_search.upper()
         view = view[view.apply(lambda r: q in f"{r['symbol']} {r['name']} {r['category']} {r['role']} {r['driver']}".upper(), axis=1)]
-    render_strip_cards(view, "instruments", ["symbol", "name", "category", "latest_close", "change_pct", "session_pct", "volume", "score", "quality", "state", "age_sec", "freshness", "source", "source_ok", "role", "driver", "updated"])
+    render_strip_cards(view, "instruments", ["symbol", "name", "category", "latest_close", "change_pct", "session_pct", "volume", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "score", "quality", "state", "age_sec", "freshness", "source", "source_ok", "role", "driver", "updated"])
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Flow Tracker":
     flow = universe_df.copy()
     flow["pressure"] = flow["score"].apply(lambda x: "Sellers" if x < -30 else "Buyers" if x > 30 else "Balanced")
     flow["absorption"] = flow["score"].apply(lambda x: "Weak" if x < -50 else "Strong" if x > 50 else "Mixed")
+    flow["volume_activity"] = flow["relative_volume"].apply(
+        lambda x: "N/A" if pd.isna(x) else "Elevated" if float(x) >= 1.35 else "Thin" if float(x) < 0.70 else "Normal"
+    )
     st.markdown("<div class='shell'><div class='section-title'>Order Flow Proxy Tracker · Interactive Strips</div><div class='small'>Synchronized price / volume / breadth / related-asset proxy. True Level II still requires a broker-grade order-flow feed.</div>", unsafe_allow_html=True)
     scope = st.selectbox("Scope", ["Selected cluster", "All instruments"], label_visibility="collapsed")
     view = flow[flow["symbol"].isin(related)] if scope == "Selected cluster" else flow
@@ -1144,7 +1354,7 @@ elif page == "Raw Data":
         "symbol": "SOURCE", "category": "DOMAIN", "latest_close": "VALUE", "change_pct": "Δ %",
         "age_sec": "AGE SEC", "freshness": "STATUS", "source": "FEED",
     })
-    raw_cols = ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "volume", "AGE SEC", "STATUS", "FEED", "source_ok"]
+    raw_cols = ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "volume", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "AGE SEC", "STATUS", "FEED", "source_ok"]
     render_editable_table(raw_view[raw_cols].copy(), "raw_data_table")
     with st.expander("Selected raw payload", expanded=False):
         r = selected.to_dict()
