@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover
     st_autorefresh = None
 
-APP_VERSION = "v8.6 Full Sector + Science Universe"
+APP_VERSION = "v8.7 Global Session Engine"
 LOCAL_TZ = ZoneInfo("America/Toronto")
 REFRESH_SECONDS = 30
 
@@ -251,6 +251,141 @@ def session_name(dt: datetime | None = None) -> str:
     if t >= datetime.strptime("16:00", "%H:%M").time() and t < datetime.strptime("20:00", "%H:%M").time():
         return "After-hours"
     return "Overnight"
+
+
+def _hm(text: str):
+    return datetime.strptime(text, "%H:%M").time()
+
+def in_window(dt: datetime, start: str, end: str) -> bool:
+    """Return True when dt's Eastern time is inside a possibly overnight time window."""
+    t = dt.astimezone(LOCAL_TZ).time()
+    a, b = _hm(start), _hm(end)
+    if a <= b:
+        return a <= t < b
+    return t >= a or t < b
+
+def minutes_until_time(dt: datetime, target: str) -> int:
+    t = _hm(target)
+    base = dt.astimezone(LOCAL_TZ)
+    target_dt = base.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+    if target_dt <= base:
+        target_dt += timedelta(days=1)
+    return int((target_dt - base).total_seconds() // 60)
+
+def fmt_minutes(mins: int) -> str:
+    if mins < 60:
+        return f"{mins}m"
+    h, m = divmod(mins, 60)
+    return f"{h}h {m}m" if m else f"{h}h"
+
+SESSION_DEFS = [
+    {"name":"Asia", "window":"8:00 PM–3:00 AM ET", "start":"20:00", "end":"03:00", "driver":"Overnight risk tone, China/Japan, USD/JPY, commodities", "watch":"NQ Globex, USD/JPY, FXI/MCHI, copper, oil"},
+    {"name":"London / Europe", "window":"3:00 AM–11:30 AM ET", "start":"03:00", "end":"11:30", "driver":"DXY, European equities, bond/yield pressure", "watch":"DXY/UUP, VGK/FEZ/EWG, yields, gold, oil"},
+    {"name":"US Pre-Market", "window":"4:00 AM–9:30 AM ET", "start":"04:00", "end":"09:30", "driver":"QQQ/SPY premarket, NQ futures, news, data releases", "watch":"QQQ, SPY, NQ=F, NVDA, SMH, VIX"},
+    {"name":"NY Cash", "window":"9:30 AM–4:00 PM ET", "start":"09:30", "end":"16:00", "driver":"Main US liquidity and opening/closing range control", "watch":"QQQ, SPY, RSP, HYG, VIX, sectors"},
+    {"name":"US After-Hours", "window":"4:00 PM–8:00 PM ET", "start":"16:00", "end":"20:00", "driver":"Earnings, guidance, late news, position unwind", "watch":"QQQ, mega-cap tech, AI leaders, after-hours range"},
+    {"name":"Globex / Futures", "window":"6:00 PM–5:00 PM ET", "start":"18:00", "end":"17:00", "driver":"Overnight futures continuation and pre-NY pressure", "watch":"NQ=F, ES=F proxy via SPY/QQQ, yields, DXY"},
+    {"name":"Crypto", "window":"24/7", "start":"00:00", "end":"00:00", "driver":"Liquidity beta and speculative risk appetite", "watch":"BTC, ETH, SOL, COIN, MSTR"},
+]
+
+def session_status(row: Dict[str, str], dt: datetime | None = None) -> Dict[str, str]:
+    dt = dt or now_et()
+    if row["name"] == "Crypto":
+        return {"status":"ACTIVE", "next":"Always open", "tone":"good"}
+    active = in_window(dt, row["start"], row["end"])
+    if active:
+        mins = minutes_until_time(dt, row["end"])
+        return {"status":"ACTIVE", "next":f"Closes in {fmt_minutes(mins)}", "tone":"good"}
+    mins = minutes_until_time(dt, row["start"])
+    return {"status":"WATCH", "next":f"Opens in {fmt_minutes(mins)}", "tone":"warn"}
+
+def current_active_sessions(dt: datetime | None = None) -> List[str]:
+    dt = dt or now_et()
+    active = []
+    for row in SESSION_DEFS:
+        if row["name"] == "Crypto" or in_window(dt, row["start"], row["end"]):
+            active.append(row["name"])
+    return active
+
+def session_tone_from_market(df: pd.DataFrame, session: str) -> Tuple[str, str]:
+    if df.empty:
+        return "Waiting for data", "No loaded market data yet"
+    if session == "Asia":
+        syms = ["EWJ", "FXI", "MCHI", "EWH", "AUDUSD=X", "HG=F", "NQ=F"]
+    elif session == "London / Europe":
+        syms = ["VGK", "FEZ", "EWG", "EWU", "UUP", "DX-Y.NYB", "GC=F", "CL=F"]
+    elif session == "US Pre-Market":
+        syms = ["QQQ", "SPY", "NQ=F", "NVDA", "SMH", "^VIX", "UUP", "^TNX"]
+    elif session == "NY Cash":
+        syms = ["QQQ", "SPY", "RSP", "IWM", "HYG", "^VIX", "XLK", "XLF"]
+    elif session == "US After-Hours":
+        syms = ["QQQ", "NQ=F", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "SMH"]
+    elif session == "Globex / Futures":
+        syms = ["NQ=F", "QQQ", "UUP", "^TNX", "GC=F", "CL=F", "BTC-USD"]
+    else:
+        syms = ["BTC-USD", "ETH-USD", "SOL-USD", "COIN", "MSTR"]
+    score = score_group(df, syms)
+    if score > 20:
+        return "Supportive", f"{score:.1f} session score"
+    if score < -20:
+        return "Pressure", f"{score:.1f} session score"
+    return "Mixed", f"{score:.1f} session score"
+
+def session_range_from_series(s: pd.Series, start: str, end: str, date=None) -> Tuple[float, float, float | None]:
+    if s.empty:
+        return np.nan, np.nan, None
+    date = date or now_et().date()
+    if start == "00:00" and end == "00:00":
+        part = s[s.index.date == date]
+    elif _hm(start) <= _hm(end):
+        day_s = s[s.index.date == date]
+        part = day_s.between_time(start, end)
+    else:
+        # Overnight: combine yesterday after start and today before end.
+        yday = date - timedelta(days=1)
+        part = pd.concat([
+            s[s.index.date == yday].between_time(start, "23:59"),
+            s[s.index.date == date].between_time("00:00", end),
+        ])
+    if part.empty:
+        return np.nan, np.nan, None
+    return float(part.max()), float(part.min()), float(part.iloc[-1])
+
+def nas_session_read(intra: Dict[str, pd.DataFrame]) -> Dict[str, Dict[str, object]]:
+    out = {}
+    for sym in ["QQQ", "NQ=F", "^NDX"]:
+        df = intra.get(sym)
+        if df is None or df.empty:
+            continue
+        close = get_close_series(df)
+        if close.empty:
+            continue
+        idx = pd.to_datetime(close.index)
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        idx = idx.tz_convert(LOCAL_TZ)
+        s = pd.Series(close.values, index=idx).dropna()
+        one_h = s.resample("60min").last().dropna()
+        four_h = s.resample("4h").last().dropna()
+        session_ranges = {}
+        for label, start, end in [
+            ("Asia", "20:00", "03:00"),
+            ("London", "03:00", "11:30"),
+            ("Pre-Market", "04:00", "09:30"),
+            ("NY Cash", "09:30", "16:00"),
+            ("After-Hours", "16:00", "20:00"),
+            ("Globex", "18:00", "17:00"),
+        ]:
+            hi, lo, last = session_range_from_series(s, start, end)
+            session_ranges[label] = {"high": hi, "low": lo, "last": last}
+        out[sym] = {
+            "last": float(s.iloc[-1]),
+            "last_time": fmt_time(s.index[-1].to_pydatetime()),
+            "1H_close": float(one_h.iloc[-1]) if not one_h.empty else np.nan,
+            "4H_close": float(four_h.iloc[-1]) if not four_h.empty else np.nan,
+            "ranges": session_ranges,
+        }
+    return out
 
 def chunked(seq: List[str], n: int) -> Iterable[List[str]]:
     for i in range(0, len(seq), n):
@@ -577,40 +712,22 @@ def headline_affected(title: str) -> str:
     return "Broad market"
 
 def extended_hours_read(intra: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Legacy table helper retained for exports only; UI now renders session cards, not an extended-hours column."""
     rows = []
-    for sym in ["QQQ", "NQ=F", "^NDX"]:
-        df = intra.get(sym)
-        if df is None or df.empty:
-            continue
-        close = get_close_series(df)
-        if close.empty:
-            continue
-        idx = pd.to_datetime(close.index)
-        if idx.tz is None:
-            idx = idx.tz_localize("UTC")
-        idx = idx.tz_convert(LOCAL_TZ)
-        s = pd.Series(close.values, index=idx).dropna()
-        today = now_et().date()
-        today_s = s[s.index.date == today]
-        pre = today_s.between_time("04:00", "09:29") if not today_s.empty else pd.Series(dtype=float)
-        reg = today_s.between_time("09:30", "15:59") if not today_s.empty else pd.Series(dtype=float)
-        aft = today_s.between_time("16:00", "20:00") if not today_s.empty else pd.Series(dtype=float)
-        one_h = s.resample("60min").last().dropna()
-        four_h = s.resample("4h").last().dropna()
-        rows.append({
+    read = nas_session_read(intra)
+    for sym, payload in read.items():
+        row = {
             "symbol": sym,
-            "session": session_name(),
-            "last_extended": float(s.iloc[-1]),
-            "last_time": fmt_time(s.index[-1].to_pydatetime()),
-            "pre_high": float(pre.max()) if not pre.empty else np.nan,
-            "pre_low": float(pre.min()) if not pre.empty else np.nan,
-            "regular_high": float(reg.max()) if not reg.empty else np.nan,
-            "regular_low": float(reg.min()) if not reg.empty else np.nan,
-            "after_high": float(aft.max()) if not aft.empty else np.nan,
-            "after_low": float(aft.min()) if not aft.empty else np.nan,
-            "1H_close": float(one_h.iloc[-1]) if not one_h.empty else np.nan,
-            "4H_close": float(four_h.iloc[-1]) if not four_h.empty else np.nan,
-        })
+            "last_price": payload.get("last", np.nan),
+            "last_time_et": payload.get("last_time", "N/A"),
+            "1H_close": payload.get("1H_close", np.nan),
+            "4H_close": payload.get("4H_close", np.nan),
+        }
+        for label, rng in payload.get("ranges", {}).items():
+            safe = label.lower().replace("-", "_").replace(" ", "_")
+            row[f"{safe}_high"] = rng.get("high", np.nan)
+            row[f"{safe}_low"] = rng.get("low", np.nan)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 def make_gauge(title: str, score: float) -> go.Figure:
@@ -755,7 +872,7 @@ with st.sidebar:
     page = st.radio(
         "Navigation",
         [
-            "Action Console", "Live Pulse", "Active Causes", "Extended Hours", "Real Estate",
+            "Action Console", "Live Pulse", "Active Causes", "Session Map", "Real Estate",
             "Healthcare", "Biotech / Science", "Pharma", "Medical Devices", "Life Science Tools",
             "Healthcare Services", "Defense / Aerospace", "Clean Energy",
             "Sectors", "Sub-Sectors", "Currencies", "Credit", "Volatility", "Global Markets",
@@ -882,6 +999,51 @@ def render_outcome_cards():
                 st.markdown(f"<div class='muted'><b>Confirm:</b> {r.confirm}</div>", unsafe_allow_html=True)
                 st.markdown(f"<div class='muted'><b>Invalid:</b> {r.invalidate}</div>", unsafe_allow_html=True)
 
+def render_session_map():
+    st.markdown("<div class='section-title'>LIVE GLOBAL SESSION MAP</div>", unsafe_allow_html=True)
+    active_names = current_active_sessions()
+    st.caption("Session times shown in America/Toronto / Eastern 12-hour market time. Extended hours is now a session map, not a table column.")
+    cols = st.columns(3)
+    for i, sess in enumerate(SESSION_DEFS):
+        status = session_status(sess)
+        tone, note = session_tone_from_market(market, sess["name"])
+        with cols[i % 3]:
+            with st.container(border=True):
+                st.markdown(f"<div class='card-title'>{status['status']} · {sess['window']}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='tile-main'>{sess['name']}</div>", unsafe_allow_html=True)
+                st.metric("Live read", tone, status["next"])
+                st.caption(f"Driver: {sess['driver']}")
+                st.caption(f"Watch: {sess['watch']}")
+                st.caption(note)
+    if active_names:
+        st.success("Active now: " + " · ".join(active_names))
+
+
+def render_nas_session_panel():
+    st.markdown("<div class='section-title'>NAS / QQQ SESSION READ</div>", unsafe_allow_html=True)
+    read = nas_session_read(intra)
+    if not read:
+        st.warning("NAS/QQQ session data not loaded yet. Use QQQ/NQ live feed when available.")
+        return
+    tabs = st.tabs([sym for sym in ["QQQ", "NQ=F", "^NDX"] if sym in read])
+    for tab, sym in zip(tabs, [sym for sym in ["QQQ", "NQ=F", "^NDX"] if sym in read]):
+        with tab:
+            payload = read[sym]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Last", fmt_num(float(payload.get("last", np.nan))), payload.get("last_time", "N/A"))
+            c2.metric("1H Close", fmt_num(float(payload.get("1H_close", np.nan))))
+            c3.metric("4H Close", fmt_num(float(payload.get("4H_close", np.nan))))
+            st.caption("Use these ranges for session-aware targets/reclaims: Asia → London → Pre-Market → NY Cash → After-Hours → Globex.")
+            rcols = st.columns(3)
+            for i, (label, rng) in enumerate(payload.get("ranges", {}).items()):
+                hi, lo, last = rng.get("high", np.nan), rng.get("low", np.nan), rng.get("last", None)
+                with rcols[i % 3]:
+                    with st.container(border=True):
+                        st.markdown(f"<div class='card-title'>{label}</div>", unsafe_allow_html=True)
+                        st.metric("High", fmt_num(float(hi)) if not pd.isna(hi) else "N/A")
+                        st.metric("Low", fmt_num(float(lo)) if not pd.isna(lo) else "N/A")
+                        st.caption(f"Last in range: {fmt_num(float(last)) if last is not None and not pd.isna(last) else 'N/A'}")
+
 def render_selected_panel():
     read = asset_action(st.session_state.selected_symbol, market, causes)
     st.markdown("<div class='section-title'>SELECTED ASSET ACTION PANEL</div>", unsafe_allow_html=True)
@@ -903,7 +1065,7 @@ with cmd_cols[0]:
 with cmd_cols[1]:
     st.metric("Local", now_et().strftime("%-I:%M %p"))
 with cmd_cols[2]:
-    st.metric("Session", session_name())
+    st.metric("Session", " / ".join(current_active_sessions()[:2]) or session_name())
 with cmd_cols[3]:
     st.metric("Data", "LIVE" if not market.empty else "NO DATA", f"{len(market)} series")
 with cmd_cols[4]:
@@ -962,6 +1124,9 @@ if page == "Action Console":
             st.markdown("<div class='card-title'>AVOID</div>", unsafe_allow_html=True)
             st.markdown(chips(["Chasing against location", "Weak score quality", "Mixed confirmations"], "warn"), unsafe_allow_html=True)
 
+    render_session_map()
+    render_nas_session_panel()
+
     st.markdown("<div class='section-title'>LIVE MARKET PULSE</div>", unsafe_allow_html=True)
     render_asset_strip(CORE_TILES, ncols=4)
     render_selected_panel()
@@ -998,14 +1163,15 @@ elif page == "Active Causes":
         else:
             st.dataframe(headlines, use_container_width=True, hide_index=True)
 
-elif page == "Extended Hours":
-    st.markdown("<div class='section-title'>NAS / QQQ EXTENDED HOURS</div>", unsafe_allow_html=True)
-    eh = extended_hours_read(intra)
-    if eh.empty:
-        st.warning("Extended-hours data not loaded yet.")
-    else:
-        st.dataframe(eh, use_container_width=True, hide_index=True)
-    st.caption("Tracks pre-market, regular NY, after-hours, overnight, and latest 1H/4H closes where feed provides intraday bars.")
+elif page == "Session Map":
+    render_session_map()
+    render_nas_session_panel()
+    with st.expander("Exportable NAS session levels", expanded=False):
+        eh = extended_hours_read(intra)
+        if eh.empty:
+            st.warning("Session-level data not loaded yet.")
+        else:
+            st.dataframe(eh, use_container_width=True, hide_index=True)
 
 elif page in ["Real Estate", "Healthcare", "Biotech / Science", "Pharma", "Medical Devices", "Life Science Tools", "Healthcare Services", "Defense / Aerospace", "Clean Energy", "Sectors", "Sub-Sectors", "Currencies", "Credit", "Volatility", "Global Markets"]:
     cat_map = {"Global Markets":"Global"}
@@ -1062,7 +1228,7 @@ elif page == "Data Health":
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Loaded Series", len(market))
     c2.metric("Local Time", now_et().strftime("%-I:%M %p"))
-    c3.metric("Session", session_name())
+    c3.metric("Active Sessions", " / ".join(current_active_sessions()[:2]) or session_name())
     c4.metric("Auto Re-run", "ON" if st.session_state.auto_refresh else "OFF")
     st.write("Live source: yfinance prices with pre/post where available; public Google News RSS for headline watch; no FRED; no demo logic.")
     missing = sorted(set([a.symbol for a in UNIVERSE]) - set(market.symbol.tolist()))
