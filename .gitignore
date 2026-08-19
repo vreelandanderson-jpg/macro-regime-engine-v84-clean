@@ -3,4 +3,4 @@ __pycache__/
 .env
 .venv/
 macro_engine.sqlite
-.DS_Store
+*.zip
