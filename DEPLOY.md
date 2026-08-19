@@ -1,17 +1,23 @@
-# v9.7 deployment
+# Deploy v9.9
 
-1. Replace the current repo files with this build.
-2. Push to the same GitHub repository used by the Streamlit app.
-3. In Streamlit Cloud open **Manage app -> Settings -> Secrets**.
-4. Add:
+## Standard / cloud
 
-```toml
-MASSIVE_API_KEY = "..."
-DATABENTO_API_KEY = "..."
+```bash
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
-5. Reboot/redeploy the app after saving secrets.
-6. Open **Data Health** in the app.
-7. Confirm provider rows show `LIVE` for the channels your plans entitle.
-8. Confirm active instruments show a real `provider_ts`, `market_age_sec`, and a direct source such as `Databento · GLBX.MDP3` or `Massive · Stocks/Indices/...`.
-9. A provider or symbol that cannot be verified must show `STALE`, `OFFLINE`, `CLOSED`, or fallback status — never a synthetic price.
+Configure `MASSIVE_API_KEY` and/or `DATABENTO_API_KEY` in Streamlit Secrets or the in-app LIVE DATA CONNECTIONS panel.
+
+## Windows + local MT5 broker feed
+
+```bash
+pip install -r requirements-mt5-windows.txt
+streamlit run app.py
+```
+
+Keep the MT5 terminal open and logged in. The app auto-discovers it. Use `MT5_TERMINAL_PATH` only when more than one terminal is installed or auto-discovery selects the wrong one.
+
+## Important
+
+A provider plan may be delayed even though the connection itself is healthy. v9.9 uses the provider event timestamp; delayed events cannot become LIVE simply because the UI refreshed.

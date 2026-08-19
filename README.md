@@ -1,138 +1,60 @@
-# Macro Regime Engine v9.7 — Live Provider Hub
+# Macro Regime Engine v9.9 — Universal Live Source Router
 
-v9.7 replaces the old "refresh means live" model with two separate clocks:
+This build replaces the closed/reference-first behavior with a universal real-level router across the entire tracked instrument universe.
 
-- **Provider event clock** — timestamp carried by the actual market event/bar/quote.
-- **UI refresh clock** — how often Streamlit redraws the current in-memory state.
+## What changed
 
-A UI rerun can no longer make an old market value look `00s LIVE`.
+- Every instrument is routed independently to the best real quote available now.
+- MT5 broker feed auto-detection was added for local Windows deployments. This lets continuously quoted broker markets such as NAS100/USTEC remain real and moving after the official cash index calculation stops.
+- Massive now covers stocks, ETFs, indices, FX, crypto **and futures** in the same engine.
+- Databento remains the highest-priority CME futures/order-book path when configured.
+- Quote midpoints can keep an instrument current when the bid/ask is moving but no new trade/aggregate printed.
+- The official/reference value is retained separately whenever a broker-active level takes over.
+- No fabricated market levels are used.
+- Existing strip-card persistence, editable Score formatting, volume diagnostics, Events calendar, Pharma, Defense/Aero, Geo/Global and Raw Data views remain.
 
-## Primary live architecture
+## Live-source setup
 
-### Databento
-Used for CME-group futures in the universe through `GLBX.MDP3`:
+### Simplest broad remote source
 
-- continuous front contract subscriptions such as `NQ.c.0`, `ES.c.0`, `YM.c.0`, `RTY.c.0`
-- 1-second OHLCV for continuously updating futures prices
-- MBP-1 for futures top-of-book / L1 order-flow fields
-- automatic background reconnect loop
+Add a Massive API key in **LIVE DATA CONNECTIONS** or Streamlit secrets. Your plan/market-data entitlements determine whether each asset class is real-time or delayed. Delayed provider timestamps are detected as stale rather than mislabeled LIVE.
 
-### Massive
-Used as the broad real-time WebSocket layer:
+### CME futures / order flow
 
-- U.S. equities / ETFs: per-second aggregates + NBBO quotes
-- U.S. cash indices: direct index value stream where covered
-- Forex: per-second quote-derived aggregates
-- Crypto: per-second aggregates
-- one connection per supported asset class, with all needed symbols multiplexed through that connection
+Add a Databento key for the higher-priority CME Globex futures stream and MBP-1 quotes.
 
-### yfinance
-Retained only as a timestamp-correct fallback/baseline source.
+### Same broker levels as your MT5 terminal
 
-It is **not** allowed to fabricate missing prices. Failed symbols remain unavailable until a real source provides a value.
+Windows/local only:
 
-## NDX / cash-index behavior
-
-`^NDX` remains the real Nasdaq 100 cash-index value. It is never overwritten with NQ futures.
-
-When cash is closed, the strip keeps the official cash value and separately exposes:
-
-- `market_state = CLOSED`
-- `live_proxy_symbol = NQ=F`
-- `live_proxy_price`
-- `live_proxy_age_sec`
-- `live_proxy_source`
-
-This gives the engine an always-active Nasdaq check without mislabeling futures as the cash index.
-
-The same separation is used for other cash/reference instruments where a valid live proxy exists.
-
-## Freshness rules
-
-For active/extended instruments:
-
-- `LIVE` = direct stream and provider event age <= 5 seconds
-- `CURRENT` = provider event age <= 25 seconds
-- `STALE` = provider event age > 25 seconds
-- `OFFLINE` = no verified price
-
-For closed instruments:
-
-- `CLOSED` = official/reference market is closed
-- `CLOSED · PROXY LIVE` = official market is closed but its configured live proxy is fresh
-
-`fetch_age_sec` and `market_age_sec` are both preserved so the app can distinguish a recent fetch from a recent market event.
-
-## Order flow
-
-Where plan entitlement exists:
-
-- CME futures use Databento `MBP-1`
-- equities / ETFs use Massive NBBO quotes
-
-Fields include:
-
-- `bid`
-- `ask`
-- `bid_size`
-- `ask_size`
-- `mid`
-- `spread`
-- `book_imbalance`
-- `orderflow_source`
-- `orderflow_ts`
-
-Other instruments retain the existing proxy-flow logic rather than pretending L1 data exists.
-
-## Volume
-
-Volume fields are no longer built from a zero-valued latest minute cell.
-
-The engine preserves:
-
-- `volume_1s` when supplied by the stream
-- `stream_volume` accumulated since connection
-- `volume_1m`
-- `session_volume`
-- `relative_volume`
-- `volume_delta_pct`
-- `volume_source`
-- `volume_proxy_symbol`
-
-For stock WebSocket aggregates, provider accumulated session volume is used when supplied. A live stream never silently replaces a fuller baseline session-volume value with an incomplete since-connect total.
-
-## UI behavior retained
-
-- strip cards remain open through automatic and manual refreshes
-- they close only when the user closes them
-- edit/format changes propagate immediately to the matching strip
-- Score display: Percentage / Decimal / Whole
-- Change display: Percentage / Decimal
-- Editable Table and Raw Table remain available
-- display overrides never mutate the underlying live/raw feed
-- Events calendar remains included
-- Pharma / Healthcare & Science and Defense / Aero remain included
-
-## Streamlit Cloud secrets
-
-Set the following in **Streamlit Cloud -> App -> Settings -> Secrets**:
-
-```toml
-MASSIVE_API_KEY = "your_key_here"
-DATABENTO_API_KEY = "your_key_here"
+```bash
+pip install -r requirements-mt5-windows.txt
+streamlit run app.py
 ```
 
-A template is included at `.streamlit/secrets.toml.example`.
+Keep MetaTrader 5 running. The engine automatically scans the broker symbol catalog and maps the tracked universe where the broker provides a matching instrument.
 
-Do not commit real API keys to GitHub.
+Optional environment controls:
 
-## Important provider-entitlement behavior
+```text
+MT5_LIVE_ENABLE=1
+MT5_TERMINAL_PATH=C:\\Program Files\\Your Broker MT5\\terminal64.exe
+MT5_POLL_MS=250
+```
 
-The app detects configuration, connection state and last provider message. If a plan does not entitle a specific channel/symbol, that instrument remains on its real fallback source and is not promoted to `LIVE` simply because the UI refreshed.
+`MT5_TERMINAL_PATH` is optional; the MetaTrader integration can auto-discover the local terminal.
 
-## Files
+## Provider keys
 
-- `app.py` — Streamlit application / UI / scoring / fallback baseline
-- `live_feeds.py` — persistent WebSocket + Databento live hub
-- `requirements.txt` — dependencies
-- `.streamlit/secrets.toml.example` — provider-key template
+Streamlit secrets:
+
+```toml
+MASSIVE_API_KEY = "..."
+DATABENTO_API_KEY = "..."
+```
+
+See `SOURCE_ROUTER.md` for exact source priority and active/reference behavior.
+
+## Options / Pressure
+
+With a Massive Options entitlement, the selected instrument loads a 20-second-cached chain snapshot with actual bid/ask, last trade, volume, open interest, IV and Greeks. Futures/cash references use a clearly labeled liquid listed-options proxy (for example NQ/NDX -> QQQ); the instrument price itself still comes from the universal live router.

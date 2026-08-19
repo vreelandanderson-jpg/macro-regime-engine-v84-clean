@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v9.7"
+APP_VERSION = "v9.9"
 MAX_DATA_AGE_SECONDS = 25
 CACHE_TTL_SECONDS = 20
 DEFAULT_REFRESH_SECONDS = 2
@@ -129,6 +129,11 @@ html, body, [data-testid="stAppViewContainer"]{
 .event-strip{display:grid;grid-template-columns:110px 120px minmax(170px,1.2fr) 90px minmax(180px,1.5fr);gap:8px;align-items:center;border:1px solid #173957;background:linear-gradient(90deg,#081827,#05101b);border-radius:12px;padding:8px 10px;margin:6px 0;}
 .event-strip .ev-date{font-weight:900;color:#dff4ff;font-size:11px}.event-strip .ev-time{font-weight:850;color:#a8bed2;font-size:10px}.event-strip .ev-name{font-weight:900;font-size:11px}.event-strip .ev-region{font-size:9px;color:#8fa3b8;text-transform:uppercase;font-weight:900}.event-strip .ev-impact{font-size:10px;color:#9fb4ca;line-height:1.25;}
 .calendar-note{border:1px solid #143b5a;background:#061521;border-radius:11px;padding:8px 10px;font-size:10px;color:#94abc1;margin-bottom:7px;}
+.connection-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:7px 0;}
+.connection-cell{border:1px solid #173957;background:#06131f;border-radius:10px;padding:8px;min-width:0;}
+.connection-provider{font-size:9px;letter-spacing:.10em;text-transform:uppercase;color:#8fa6bc;font-weight:900;}
+.connection-state{font-size:13px;font-weight:950;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.clock-live{color:var(--green)}.clock-stale{color:var(--red)}.clock-closed{color:#9db1c5}.clock-current{color:var(--yellow)}
 @media(max-width:1200px){
     .instrument-strip{grid-template-columns:repeat(3,minmax(0,1fr));}
     .decision-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
@@ -252,6 +257,19 @@ ALIASES = {
     "GOLD": "GC=F", "GC": "GC=F", "OIL": "CL=F", "CL": "CL=F", "DXY": "DX-Y.NYB", "VIX": "^VIX",
     "REAL ESTATE": "XLRE", "HEALTHCARE": "XLV", "SCIENCE": "IBB", "BIOTECH": "XBI", "AI": "NVDA",
     "DEFENSE": "ITA", "DEFENCE": "ITA", "AEROSPACE": "ITA", "AERO": "ITA",
+}
+
+# Optionable underlyings used by the live Options page. For futures/cash references
+# the dashboard uses the closest liquid listed options proxy and labels that proxy.
+OPTION_UNDERLYING_MAP = {
+    "NQ=F": "QQQ", "^NDX": "QQQ",
+    "ES=F": "SPY", "^GSPC": "SPY",
+    "YM=F": "DIA", "^DJI": "DIA",
+    "RTY=F": "IWM", "^RUT": "IWM",
+    "GC=F": "GLD", "CL=F": "USO", "SI=F": "SLV", "HG=F": "CPER", "NG=F": "UNG",
+    "DX-Y.NYB": "UUP", "^TNX": "TLT", "^VIX": "VIX", "^VVIX": "VIX", "^VIX9D": "VIX",
+    "EURUSD=X": "UUP", "JPY=X": "UUP", "CAD=X": "UUP",
+    "BTC-USD": "IBIT", "ETH-USD": "ETHA",
 }
 CORE = ["NQ=F", "ES=F", "QQQ", "SPY", "DX-Y.NYB", "^TNX", "^VIX", "GC=F", "CL=F", "BTC-USD", "NVDA", "SMH", "RSP", "HYG"]
 
@@ -446,7 +464,8 @@ def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
     return _apply_volume_proxies(pd.DataFrame(rows))
 
 
-def _secret(name: str) -> str:
+def _stored_secret(name: str) -> str:
+    """Read a deployment secret/environment key without ever rendering it back to the UI."""
     try:
         value = st.secrets.get(name, "")
         if value:
@@ -456,9 +475,81 @@ def _secret(name: str) -> str:
     return str(os.getenv(name, "") or "").strip()
 
 
+def _resolved_provider_key(name: str) -> str:
+    """Session-entered credentials override deployment secrets. Pause disables both."""
+    if not bool(st.session_state.get("live_providers_enabled", True)):
+        return ""
+    session_key = f"runtime_{name.lower()}"
+    runtime = str(st.session_state.get(session_key, "") or "").strip()
+    return runtime or _stored_secret(name)
+
+
+def _credential_origin(name: str) -> str:
+    if not bool(st.session_state.get("live_providers_enabled", True)):
+        return "PAUSED"
+    runtime = str(st.session_state.get(f"runtime_{name.lower()}", "") or "").strip()
+    if runtime:
+        return "SESSION"
+    if _stored_secret(name):
+        return "DEPLOYMENT SECRET"
+    return "NOT CONFIGURED"
+
+
 @st.cache_resource(show_spinner=False)
-def get_live_hub(massive_key: str, databento_key: str) -> LiveMarketHub:
-    return LiveMarketHub(massive_key=massive_key, databento_key=databento_key)
+def get_live_hub(massive_key: str, databento_key: str, providers_enabled: bool = True) -> LiveMarketHub:
+    return LiveMarketHub(massive_key=massive_key, databento_key=databento_key, mt5_enabled=providers_enabled)
+
+
+def _stop_live_hub_for_keys(massive_key: str, databento_key: str) -> None:
+    """Gracefully stop the currently cached hub before credentials are changed."""
+    try:
+        hub = get_live_hub(massive_key, databento_key, True)
+        hub.stop()
+    except Exception:
+        pass
+    try:
+        get_live_hub.clear()
+    except Exception:
+        pass
+
+
+def _available_provider_key(name: str) -> str:
+    """Return the configured key regardless of the pause toggle; used for clean shutdown."""
+    runtime = str(st.session_state.get(f"runtime_{name.lower()}", "") or "").strip()
+    return runtime or _stored_secret(name)
+
+
+def _provider_connect_callback() -> None:
+    old_m = _available_provider_key("MASSIVE_API_KEY")
+    old_d = _available_provider_key("DATABENTO_API_KEY")
+    _stop_live_hub_for_keys(old_m, old_d)
+    massive_entry = str(st.session_state.get("massive_key_entry", "") or "").strip()
+    databento_entry = str(st.session_state.get("databento_key_entry", "") or "").strip()
+    if massive_entry:
+        st.session_state.runtime_massive_api_key = massive_entry
+    if databento_entry:
+        st.session_state.runtime_databento_api_key = databento_entry
+    st.session_state.live_providers_enabled = True
+    # Clear the visible password fields after the keys have been copied into the
+    # session-only credential store. Callback timing makes this Streamlit-safe.
+    st.session_state.massive_key_entry = ""
+    st.session_state.databento_key_entry = ""
+
+
+def _provider_pause_callback() -> None:
+    old_m = _available_provider_key("MASSIVE_API_KEY")
+    old_d = _available_provider_key("DATABENTO_API_KEY")
+    _stop_live_hub_for_keys(old_m, old_d)
+    st.session_state.live_providers_enabled = False
+
+
+def _provider_enabled_changed() -> None:
+    # The widget callback runs before the script rerenders, so stopping/clearing the
+    # old resource here avoids orphaned provider threads and avoids session-state
+    # mutation after widget instantiation.
+    old_m = _available_provider_key("MASSIVE_API_KEY")
+    old_d = _available_provider_key("DATABENTO_API_KEY")
+    _stop_live_hub_for_keys(old_m, old_d)
 
 
 def market_state_for_symbol(sym: str, dt: datetime | None = None) -> str:
@@ -504,14 +595,20 @@ def _seconds_since(value: object) -> int:
 
 def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveMarketHub]:
     baseline = fetch_universe_snapshot(symbols).copy()
-    massive_key = _secret("MASSIVE_API_KEY")
-    databento_key = _secret("DATABENTO_API_KEY")
-    hub = get_live_hub(massive_key, databento_key)
+    massive_key = _resolved_provider_key("MASSIVE_API_KEY")
+    databento_key = _resolved_provider_key("DATABENTO_API_KEY")
+    hub = get_live_hub(massive_key, databento_key, bool(st.session_state.get("live_providers_enabled", True)))
     hub.ensure_started(list(symbols))
     live = hub.snapshot()
 
     if baseline.empty:
         baseline = pd.DataFrame([fallback_row(sym, now_et().isoformat()) for sym in symbols])
+    # Preserve the last official/reference value before the universal live router
+    # overlays an exchange or broker-active level. This prevents loss of auditability
+    # when a 24h broker quote takes over a cash/reference instrument after hours.
+    baseline["reference_price"] = pd.to_numeric(baseline.get("latest_close"), errors="coerce")
+    baseline["reference_provider_ts"] = baseline.get("provider_ts")
+    baseline["reference_source"] = baseline.get("source")
     baseline = baseline.set_index("symbol", drop=False)
     for sym, tick in live.items():
         if sym not in baseline.index:
@@ -526,6 +623,14 @@ def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveM
             baseline.at[sym, key] = value
 
     out = baseline.reset_index(drop=True)
+    if "price_type" not in out.columns:
+        out["price_type"] = "REFERENCE"
+    else:
+        out["price_type"] = out["price_type"].fillna("REFERENCE")
+    if "active_provider_symbol" not in out.columns:
+        out["active_provider_symbol"] = out["symbol"].astype(str)
+    else:
+        out["active_provider_symbol"] = out["active_provider_symbol"].fillna(out["symbol"]).astype(str)
     out["market_state"] = out["symbol"].apply(market_state_for_symbol)
     out["market_age_sec"] = out.apply(lambda r: _seconds_since(r.get("provider_ts") or r.get("updated")), axis=1)
     out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts")), axis=1)
@@ -547,6 +652,57 @@ def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveM
                 out.at[i, "live_proxy_price"] = proxy.get("latest_close", np.nan)
                 out.at[i, "live_proxy_age_sec"] = proxy.get("market_age_sec", np.nan)
                 out.at[i, "live_proxy_source"] = proxy.get("source", "")
+
+    # ALWAYS-ON CHECK CLOCK: keep the official instrument price separate from the
+    # instrument used to monitor current market conditions. A closed cash index can
+    # therefore remain under live surveillance through a valid futures/ETF proxy
+    # without ever overwriting its official close.
+    out["monitor_symbol"] = out["symbol"].astype(str)
+    out["monitor_price"] = pd.to_numeric(out["latest_close"], errors="coerce")
+    out["monitor_age_sec"] = pd.to_numeric(out["market_age_sec"], errors="coerce")
+    out["monitor_source"] = out["source"].astype(str)
+    out["monitor_mode"] = "DIRECT"
+    out["monitor_status"] = "CHECKING"
+    for i, row in out.iterrows():
+        mstate = str(row.get("market_state", "UNKNOWN"))
+        source_ok = bool(row.get("source_ok", False))
+        market_age = int(row.get("market_age_sec", 999999)) if pd.notna(row.get("market_age_sec", np.nan)) else 999999
+        fetch_age = int(row.get("fetch_age_sec", 999999)) if pd.notna(row.get("fetch_age_sec", np.nan)) else 999999
+        proxy_sym = str(row.get("live_proxy_symbol", "") or "")
+        proxy_age = row.get("live_proxy_age_sec", np.nan)
+        proxy_price = row.get("live_proxy_price", np.nan)
+
+        direct_stream = str(row.get("feed_mode", "")).upper() == "STREAM" and market_age <= MAX_DATA_AGE_SECONDS and pd.notna(row.get("latest_close", np.nan))
+        if direct_stream:
+            # A real broker/exchange quote remains DIRECT even if the canonical cash
+            # reference is outside its official calculation hours. Example: ^NDX can
+            # display a real broker NAS100/USTEC level while its official NDX reference
+            # remains preserved in reference_price.
+            price_type = str(row.get("price_type", "DIRECT LIVE") or "DIRECT LIVE")
+            out.at[i, "monitor_mode"] = price_type
+            out.at[i, "monitor_status"] = "LIVE" if market_age <= 5 else "CURRENT"
+        elif mstate in {"OPEN", "EXTENDED"}:
+            out.at[i, "monitor_mode"] = "DIRECT"
+            out.at[i, "monitor_status"] = "CURRENT" if market_age <= MAX_DATA_AGE_SECONDS else "STALE"
+        elif proxy_sym and pd.notna(proxy_age) and float(proxy_age) <= MAX_DATA_AGE_SECONDS and pd.notna(proxy_price):
+            out.at[i, "monitor_symbol"] = proxy_sym
+            out.at[i, "monitor_price"] = proxy_price
+            out.at[i, "monitor_age_sec"] = float(proxy_age)
+            out.at[i, "monitor_source"] = str(row.get("live_proxy_source", "") or "")
+            out.at[i, "monitor_mode"] = "LIVE PROXY"
+            out.at[i, "monitor_status"] = "PROXY LIVE" if float(proxy_age) <= 5 else "PROXY CURRENT"
+        else:
+            # Closed markets do not produce a legitimate new trade/index value. The
+            # engine still verifies the source on every baseline cycle and exposes
+            # that check clock separately from the frozen official market timestamp.
+            out.at[i, "monitor_age_sec"] = fetch_age
+            out.at[i, "monitor_mode"] = "REFERENCE CHECK" if mstate in {"CLOSED", "BREAK"} else "DIRECT"
+            if not source_ok or pd.isna(row.get("latest_close", np.nan)):
+                out.at[i, "monitor_status"] = "OFFLINE"
+            elif fetch_age <= MAX_DATA_AGE_SECONDS and mstate in {"CLOSED", "BREAK"}:
+                out.at[i, "monitor_status"] = "REFERENCE · CHECKED"
+            else:
+                out.at[i, "monitor_status"] = "STALE"
     return _apply_volume_proxies(out), hub
 
 
@@ -619,14 +775,16 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
         if not bool(r.get("source_ok", False)) or pd.isna(r.get("latest_close", np.nan)):
             return "OFFLINE"
         mstate = str(r.get("market_state", "UNKNOWN"))
-        if mstate in {"CLOSED", "BREAK"}:
-            proxy_age = r.get("live_proxy_age_sec", np.nan)
-            if pd.notna(proxy_age) and float(proxy_age) <= MAX_DATA_AGE_SECONDS:
-                return "CLOSED · PROXY LIVE"
-            return "CLOSED" if mstate == "CLOSED" else "BREAK"
         age = int(r.get("market_age_sec", 999999))
         if age <= 5 and str(r.get("feed_mode", "")).upper() == "STREAM":
             return "LIVE"
+        if age <= MAX_DATA_AGE_SECONDS and str(r.get("feed_mode", "")).upper() == "STREAM":
+            return "CURRENT"
+        if mstate in {"CLOSED", "BREAK"}:
+            proxy_age = r.get("live_proxy_age_sec", np.nan)
+            if pd.notna(proxy_age) and float(proxy_age) <= MAX_DATA_AGE_SECONDS:
+                return "REFERENCE · PROXY LIVE"
+            return "REFERENCE" if mstate == "CLOSED" else "BREAK"
         if age <= MAX_DATA_AGE_SECONDS:
             return "CURRENT"
         return "STALE"
@@ -833,7 +991,7 @@ def _table_column_config(columns: list[str]) -> dict:
             cfg[col] = st.column_config.NumberColumn(str(col), format="%.2f×")
         elif low == "volume_delta_pct":
             cfg[col] = st.column_config.NumberColumn(str(col), format="%+.2f%%")
-        elif low in {"age_sec", "age sec"}:
+        elif low in {"age_sec", "age sec", "market_age_sec", "fetch_age_sec", "monitor_age_sec", "live_proxy_age_sec"}:
             cfg[col] = st.column_config.NumberColumn(str(col), format="%d")
     return cfg
 
@@ -985,12 +1143,14 @@ def strip_summary(row: pd.Series) -> str:
     pct = float(row.get("change_pct", 0.0)) if pd.notna(row.get("change_pct", np.nan)) else 0.0
     freshness = str(row.get("freshness", "—"))
     market_state = str(row.get("market_state", ""))
-    proxy = str(row.get("live_proxy_symbol", "") or "")
-    status = freshness if not proxy else f"{freshness} · {proxy} proxy"
+    monitor_status = str(row.get("monitor_status", freshness) or freshness)
+    monitor_symbol = str(row.get("monitor_symbol", row.get("symbol", "")) or "")
+    own_symbol = str(row.get("symbol", "") or "")
+    status = monitor_status if monitor_symbol == own_symbol else f"{monitor_status} · {monitor_symbol}"
     return (
         f"{row.get('symbol','—')}  ·  {row.get('name','—')}   |   "
         f"{short_num(row.get('latest_close'))}   {format_change(pct)}   ·   "
-        f"{row.get('state','—')}   ·   {market_state}   ·   {status}"
+        f"{row.get('state','—')}   ·   {row.get('price_type','REFERENCE')}   ·   {status}"
     )
 
 
@@ -1169,11 +1329,75 @@ def health_rows(df: pd.DataFrame, selected_symbol: str) -> list[tuple[str, int |
     for name, subset in groups:
         age = _active_age(subset)
         if age is None:
-            rows.append((name, None, "IDLE/CLOSED", "yellow"))
+            rows.append((name, None, "REFERENCE/IDLE", "yellow"))
         else:
             status, tone = health_state(age)
             rows.append((name, age, status, tone))
     return rows
+
+
+def option_underlying_for(symbol: str) -> str:
+    symbol = str(symbol or "").upper()
+    if symbol in OPTION_UNDERLYING_MAP:
+        return OPTION_UNDERLYING_MAP[symbol]
+    # Equities/ETFs in the universal instrument map are option-query candidates.
+    if symbol and not symbol.startswith("^") and "=" not in symbol and not symbol.endswith("-USD"):
+        return symbol
+    return ""
+
+
+def normalize_option_chain(rows: list[dict]) -> pd.DataFrame:
+    out = []
+    for item in rows or []:
+        details = item.get("details") or {}
+        day = item.get("day") or {}
+        quote = item.get("last_quote") or {}
+        trade = item.get("last_trade") or {}
+        greeks = item.get("greeks") or {}
+        underlying = item.get("underlying_asset") or {}
+        bid = pd.to_numeric(quote.get("bid"), errors="coerce")
+        ask = pd.to_numeric(quote.get("ask"), errors="coerce")
+        midpoint = pd.to_numeric(quote.get("midpoint"), errors="coerce")
+        if pd.isna(midpoint) and pd.notna(bid) and pd.notna(ask):
+            midpoint = (float(bid) + float(ask)) / 2.0
+        out.append({
+            "contract": details.get("ticker"),
+            "type": str(details.get("contract_type") or "").upper(),
+            "expiration": details.get("expiration_date"),
+            "strike": pd.to_numeric(details.get("strike_price"), errors="coerce"),
+            "bid": bid, "ask": ask, "mid": midpoint,
+            "last": pd.to_numeric(trade.get("price"), errors="coerce"),
+            "volume": pd.to_numeric(day.get("volume"), errors="coerce"),
+            "open_interest": pd.to_numeric(item.get("open_interest"), errors="coerce"),
+            "iv": pd.to_numeric(item.get("implied_volatility"), errors="coerce"),
+            "delta": pd.to_numeric(greeks.get("delta"), errors="coerce"),
+            "gamma": pd.to_numeric(greeks.get("gamma"), errors="coerce"),
+            "theta": pd.to_numeric(greeks.get("theta"), errors="coerce"),
+            "vega": pd.to_numeric(greeks.get("vega"), errors="coerce"),
+            "quote_timeframe": quote.get("timeframe"),
+            "trade_timeframe": trade.get("timeframe"),
+            "underlying_price": pd.to_numeric(underlying.get("price"), errors="coerce"),
+            "underlying_timeframe": underlying.get("timeframe"),
+        })
+    return pd.DataFrame(out)
+
+
+def option_chain_summary(df: pd.DataFrame) -> dict:
+    if df is None or df.empty:
+        return {"contracts": 0, "call_oi": np.nan, "put_oi": np.nan, "call_volume": np.nan, "put_volume": np.nan, "avg_iv": np.nan, "timeframe": "UNAVAILABLE"}
+    calls = df[df["type"] == "CALL"]
+    puts = df[df["type"] == "PUT"]
+    frames = [str(x).upper() for x in pd.concat([df["quote_timeframe"], df["trade_timeframe"]]).dropna().unique().tolist()]
+    timeframe = "REAL-TIME" if any("REAL" in x for x in frames) else "DELAYED" if frames else "UNKNOWN"
+    return {
+        "contracts": int(len(df)),
+        "call_oi": float(pd.to_numeric(calls["open_interest"], errors="coerce").fillna(0).sum()),
+        "put_oi": float(pd.to_numeric(puts["open_interest"], errors="coerce").fillna(0).sum()),
+        "call_volume": float(pd.to_numeric(calls["volume"], errors="coerce").fillna(0).sum()),
+        "put_volume": float(pd.to_numeric(puts["volume"], errors="coerce").fillna(0).sum()),
+        "avg_iv": float(pd.to_numeric(df["iv"], errors="coerce").dropna().median()) if pd.to_numeric(df["iv"], errors="coerce").notna().any() else np.nan,
+        "timeframe": timeframe,
+    }
 
 
 def health_card(df: pd.DataFrame, selected_symbol: str) -> str:
@@ -1187,7 +1411,7 @@ def health_card(df: pd.DataFrame, selected_symbol: str) -> str:
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.7</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.9</span></div><div class='small'>UNIVERSAL LIVE SOURCE ROUTER · GEO + MARKET</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -1197,7 +1421,26 @@ def render_sidebar() -> tuple[str, bool, int]:
         st.markdown("---")
         auto = st.toggle("Auto refresh", value=True)
         interval = st.selectbox("UI refresh", [1, 2, 5, 10, 15, 20, 25], index=1, format_func=lambda x: f"{x} sec")
-        st.caption("Live provider streams run continuously · UI redraw is independent · active-market SLA ≤25s")
+        st.caption("Universal router runs continuously · actual provider/broker levels · UI redraw independent · SLA ≤25s")
+
+        with st.expander("LIVE DATA CONNECTIONS", expanded=False):
+            enabled = st.toggle("Live providers enabled", key="live_providers_enabled", on_change=_provider_enabled_changed)
+            massive_origin = _credential_origin("MASSIVE_API_KEY")
+            databento_origin = _credential_origin("DATABENTO_API_KEY")
+            mt5_origin = "AUTO-DETECT"
+            st.caption(f"MT5 broker: {mt5_origin} · Massive: {massive_origin} · Databento: {databento_origin}")
+            st.caption("MT5 needs no API key when this app runs on the same Windows machine as the terminal. Massive can cover stocks/ETFs/indices/FX/crypto/futures; Databento remains the higher-priority CME futures path when entitled.")
+            st.caption("Keys entered here are kept only in this Streamlit session. Deployment Secrets remain the persistent method and are never displayed back in the app.")
+            massive_entry = st.text_input("Massive API key", type="password", key="massive_key_entry", placeholder="Paste key or leave blank to use existing secret")
+            databento_entry = st.text_input("Databento API key", type="password", key="databento_key_entry", placeholder="Paste key or leave blank to use existing secret")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.button("CONNECT / RESTART", key="provider_connect", use_container_width=True, on_click=_provider_connect_callback)
+            with c2:
+                st.button("PAUSE STREAMS", key="provider_pause", use_container_width=True, on_click=_provider_pause_callback)
+            if not enabled:
+                st.warning("Live providers are paused. The app will use timestamp-correct fallback checks only.")
+
         with st.expander("DISPLAY / TABLES", expanded=False):
             st.selectbox(
                 "Score format",
@@ -1224,18 +1467,29 @@ if "last_manual_update" not in st.session_state:
 # Defaults are created before the sidebar widgets are instantiated.
 st.session_state.setdefault("global_score_format", "Percentage")
 st.session_state.setdefault("global_change_format", "Percentage")
+st.session_state.setdefault("live_providers_enabled", True)
+st.session_state.setdefault("runtime_massive_api_key", "")
+st.session_state.setdefault("runtime_databento_api_key", "")
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v97")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v99")
 
 # One universe state, continuously overlaid by provider WebSockets. Stream ingestion is
 # independent of Streamlit reruns; every page reads the same thread-safe live hub.
 raw_universe, live_hub = build_market_snapshot(tuple(SYMBOLS))
 universe_df = enrich(raw_universe)
-_active = universe_df[universe_df["market_state"].isin(["OPEN", "EXTENDED"])] if not universe_df.empty else universe_df
+_active = universe_df[(universe_df["market_state"].isin(["OPEN", "EXTENDED"])) | ((universe_df["feed_mode"].astype(str).str.upper() == "STREAM") & (pd.to_numeric(universe_df["market_age_sec"], errors="coerce") <= MAX_DATA_AGE_SECONDS))] if not universe_df.empty else universe_df
 snapshot_age = int(_active["market_age_sec"].max()) if len(_active) else 0
 snapshot_state, snapshot_tone = health_state(snapshot_age) if len(_active) else ("IDLE", "yellow")
+_check_age = pd.to_numeric(universe_df.get("monitor_age_sec", pd.Series(dtype=float)), errors="coerce")
+check_total = int(len(universe_df))
+check_fresh = int((_check_age <= MAX_DATA_AGE_SECONDS).sum()) if check_total else 0
+check_stale = max(0, check_total - check_fresh)
+active_total = int(len(_active))
+active_fresh = int((pd.to_numeric(_active.get("market_age_sec", pd.Series(dtype=float)), errors="coerce") <= MAX_DATA_AGE_SECONDS).sum()) if active_total else 0
+active_stale = max(0, active_total - active_fresh)
+check_tone = "green" if check_stale == 0 else "yellow" if check_fresh >= max(1, int(check_total * .85)) else "red"
 provider_status = live_hub.provider_status()
 provider_config = live_hub.configured_summary()
 
@@ -1249,19 +1503,21 @@ with h1:
 with h2:
     st.markdown(f"<div class='micro'>Toronto</div><div class='mid'>{now_et().strftime('%-I:%M %p')}</div>", unsafe_allow_html=True)
 with h3:
-    st.markdown(f"<div class='micro'>Snapshot</div><div class='{snapshot_tone}' style='font-weight:900'>{snapshot_age:02d}s · {snapshot_state}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='micro'>Live Checks</div><div class='{check_tone}' style='font-weight:900'>{check_fresh}/{check_total} ≤25s</div>", unsafe_allow_html=True)
 with h4:
     pstat_header = pd.DataFrame(provider_status)
+    mt5_live = False
     massive_live = False
     databento_live = False
     if not pstat_header.empty:
         live_mask = pstat_header["connected"].fillna(False) & pstat_header["authenticated"].fillna(False)
+        mt5_live = bool(((pstat_header["provider"] == "mt5") & live_mask).any())
         massive_live = bool(((pstat_header["provider"] == "massive") & live_mask).any())
         databento_live = bool(((pstat_header["provider"] == "databento") & live_mask).any())
-    live_count = int(massive_live) + int(databento_live)
-    configured_count = int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
+    live_count = int(mt5_live) + int(massive_live) + int(databento_live)
+    configured_count = int(bool(provider_config.get("mt5"))) + int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
     if live_count:
-        engine_text = f"{live_count}/2 STREAMING · UI {refresh_interval}s"
+        engine_text = f"{live_count} SOURCE{'S' if live_count != 1 else ''} STREAMING · UI {refresh_interval}s"
     elif configured_count:
         engine_text = f"CONNECTING · UI {refresh_interval}s"
     else:
@@ -1303,7 +1559,7 @@ if page == "Dashboard":
         with s5:
             st.markdown(card_html("Market State", state_for(core_state["macro"]), "composite", color_for(core_state["macro"]), "NOW"), unsafe_allow_html=True)
         with s6:
-            st.markdown(card_html("Data Age", f"{snapshot_age:02d}s", "all layers ≤25s", snapshot_tone, snapshot_state), unsafe_allow_html=True)
+            st.markdown(card_html("Live Checks", f"{check_fresh}/{check_total}", f"active {active_fresh}/{active_total} · stale {check_stale}", check_tone, "≤25s"), unsafe_allow_html=True)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         left, center, right = st.columns([1.05, 2.35, .95], gap="small")
@@ -1331,10 +1587,14 @@ if page == "Dashboard":
             with st.popover("Instrument details", use_container_width=True):
                 st.caption(f"Category: {selected['category']}")
                 st.caption(f"Driver: {selected['driver']}")
-                st.caption(f"Source: {selected['source']} · {selected.get('feed_mode','—')}")
+                st.caption(f"Source: {selected['source']} · {selected.get('feed_mode','—')} · {selected.get('price_type','REFERENCE')}")
+                st.caption(f"Provider symbol: {selected.get('active_provider_symbol', selected.get('symbol','—'))}")
                 st.caption(f"Market state: {selected.get('market_state','—')}")
+                if pd.notna(selected.get("reference_price", np.nan)) and (str(selected.get("source", "")) != str(selected.get("reference_source", "")) or str(selected.get("price_type", "")).startswith("BROKER")):
+                    st.caption(f"Official/reference: {short_num(selected.get('reference_price'))} · {selected.get('reference_source','—')} · {selected.get('reference_provider_ts') or '—'}")
                 st.caption(f"Provider event age: {int(selected.get('market_age_sec',999999))} sec")
                 st.caption(f"Last provider event: {selected.get('provider_ts') or '—'}")
+                st.caption(f"Always-on check: {selected.get('monitor_status','—')} · {selected.get('monitor_symbol','—')} @ {short_num(selected.get('monitor_price'))} · age {int(selected.get('monitor_age_sec',999999))}s")
                 if selected.get("live_proxy_symbol"):
                     st.caption(f"Live closed-market proxy: {selected.get('live_proxy_symbol')} @ {short_num(selected.get('live_proxy_price'))} · age {int(selected.get('live_proxy_age_sec',999999))}s")
 
@@ -1410,7 +1670,7 @@ if page == "Dashboard":
                 (selected["symbol"], selected["state"]),
                 ("Driver", cause["cause"]),
                 ("Session", sess["active"]),
-                ("Snapshot", f"{snapshot_age:02d}s {snapshot_state}"),
+                ("Checks", f"{check_fresh}/{check_total} ≤25s"),
             ]
             alert_html = "<div class='card compact'><div class='section-title'>Alerts</div>" + "".join(
                 f"<div class='rowline'><span>{a}</span><b>{b}</b></div>" for a, b in alerts
@@ -1487,7 +1747,7 @@ if page == "Dashboard":
 
     with diag_tab:
         st.markdown("<div class='shell'><div class='section-title'>Selected Instrument · synchronized direct data</div>", unsafe_allow_html=True)
-        diag_cols = [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "market_state", "market_age_sec", "freshness", "source", "feed_mode", "provider_ts", "live_proxy_symbol", "live_proxy_price", "bid", "ask", "book_imbalance", "role"] if c in rel_df.columns]
+        diag_cols = [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "market_state", "market_age_sec", "freshness", "source", "feed_mode", "price_type", "active_provider_symbol", "reference_price", "reference_source", "provider_ts", "live_proxy_symbol", "live_proxy_price", "bid", "ask", "book_imbalance", "role"] if c in rel_df.columns]
         render_editable_table(rel_df[diag_cols].copy(), "dashboard_diagnostics_table")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1503,7 +1763,7 @@ elif page == "Instruments":
     if inst_search:
         q = inst_search.upper()
         view = view[view.apply(lambda r: q in f"{r['symbol']} {r['name']} {r['category']} {r['role']} {r['driver']}".upper(), axis=1)]
-    render_strip_cards(view, "instruments", [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "session_pct", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "score", "quality", "state", "market_state", "market_age_sec", "fetch_age_sec", "freshness", "source", "feed_mode", "source_ok", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "live_proxy_source", "role", "driver", "provider_ts", "received_ts"] if c in view.columns])
+    render_strip_cards(view, "instruments", [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "session_pct", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "score", "quality", "state", "market_state", "market_age_sec", "fetch_age_sec", "freshness", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "monitor_source", "source", "feed_mode", "price_type", "active_provider_symbol", "reference_price", "reference_source", "reference_provider_ts", "source_ok", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "live_proxy_source", "role", "driver", "provider_ts", "received_ts"] if c in view.columns])
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Flow Tracker":
@@ -1525,7 +1785,44 @@ elif page == "Options / Pressure":
     tmp = universe_df.copy()
     tmp["options_pressure"] = tmp["score"].apply(lambda x: "Put pressure" if x < -30 else "Call support" if x > 30 else "Neutral")
     tmp["iv_event_risk"] = tmp["score"].apply(lambda x: "Elevated" if abs(x) > 40 else "Normal")
-    st.markdown("<div class='shell'><div class='section-title'>Options / Instrument Pressure · Interactive Strips</div><div class='small'>Options remains a mapped pressure layer; dedicated greeks / chain / dealer positioning requires a connected options data provider.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='shell'><div class='section-title'>Options / Instrument Pressure · Live Chain + Interactive Strips</div><div class='small'>The selected instrument now queries actual Massive options-chain snapshots when the connected plan permits. Futures/cash references use a labeled liquid listed-options proxy; the universal live level remains the instrument's own routed level.</div>", unsafe_allow_html=True)
+
+    opt_underlying = option_underlying_for(selected_symbol)
+    chain_rows = live_hub.options_chain_snapshot(opt_underlying, max_age_seconds=20.0, limit=250) if opt_underlying else []
+    chain_df = normalize_option_chain(chain_rows)
+    chain_summary = option_chain_summary(chain_df)
+    o1, o2, o3, o4, o5 = st.columns(5)
+    o1.metric("Options underlying", opt_underlying or "N/A", help=f"Selected dashboard instrument: {selected_symbol}")
+    o2.metric("Chain contracts", chain_summary["contracts"])
+    o3.metric("Call OI", "—" if pd.isna(chain_summary["call_oi"]) else f"{chain_summary['call_oi']:,.0f}")
+    o4.metric("Put OI", "—" if pd.isna(chain_summary["put_oi"]) else f"{chain_summary['put_oi']:,.0f}")
+    o5.metric("Feed", chain_summary["timeframe"])
+    if not chain_df.empty:
+        cf1, cf2 = st.columns([1.0, 3.0])
+        with cf1:
+            expiries = [x for x in sorted(chain_df["expiration"].dropna().astype(str).unique().tolist())]
+            expiry_pick = st.selectbox("Expiry", ["Nearest loaded"] + expiries, key="options_expiry_filter")
+            type_pick = st.radio("Contract", ["All", "CALL", "PUT"], horizontal=True, key="options_type_filter")
+            if pd.notna(chain_summary["avg_iv"]):
+                st.metric("Median IV", f"{chain_summary['avg_iv']:.2%}")
+            st.caption(f"Call vol {chain_summary['call_volume']:,.0f} · Put vol {chain_summary['put_volume']:,.0f}")
+        with cf2:
+            chain_view = chain_df.copy()
+            if expiry_pick == "Nearest loaded" and expiries:
+                chain_view = chain_view[chain_view["expiration"].astype(str) == expiries[0]]
+            elif expiry_pick != "Nearest loaded":
+                chain_view = chain_view[chain_view["expiration"].astype(str) == expiry_pick]
+            if type_pick != "All":
+                chain_view = chain_view[chain_view["type"] == type_pick]
+            display_cols = ["contract", "type", "expiration", "strike", "bid", "ask", "mid", "last", "volume", "open_interest", "iv", "delta", "gamma", "theta", "vega", "quote_timeframe", "trade_timeframe"]
+            st.dataframe(chain_view[display_cols].head(250), use_container_width=True, hide_index=True)
+    else:
+        if provider_config.get("massive") and opt_underlying:
+            st.warning("No options chain returned for this underlying/entitlement. The instrument's live routed level continues independently.")
+        else:
+            st.info("Connect Massive to populate actual option-chain pricing/Greeks. The strip matrix below still tracks the complete instrument universe.")
+
+    st.markdown("<div class='section-title' style='margin-top:10px'>Universal Instrument Pressure Matrix</div>", unsafe_allow_html=True)
     render_strip_cards(tmp, "options")
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1584,19 +1881,40 @@ elif page == "Events":
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Data Health":
-    st.markdown("<div class='shell'><div class='section-title'>Data Health · Provider + Instrument Clocks</div>", unsafe_allow_html=True)
+    st.markdown("<div class='shell'><div class='section-title'>Data Health · Always-On Provider + Instrument Clocks</div>", unsafe_allow_html=True)
     st.markdown(health_card(universe_df, selected_symbol), unsafe_allow_html=True)
-    configured_count = int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
-    if configured_count < 2:
-        st.warning("Dedicated live providers are not fully configured. Uncovered instruments use timestamp-correct yfinance fallback and are never labelled LIVE unless their actual provider event age is within the active-market SLA.")
+
+    cfg1, cfg2, cfg3, cfg4, cfg5 = st.columns(5)
+    with cfg1:
+        st.markdown(card_html("Universe Checks", f"{check_fresh}/{check_total}", f"stale {check_stale}", check_tone, "≤25s"), unsafe_allow_html=True)
+    with cfg2:
+        active_tone = "green" if active_stale == 0 else "red"
+        st.markdown(card_html("Active Levels", f"{active_fresh}/{active_total}", f"stale {active_stale}", active_tone, "REAL"), unsafe_allow_html=True)
+    with cfg3:
+        st.markdown(card_html("MT5 Broker", "AUTO", "local real broker levels", "green" if provider_config.get("mt5") else "yellow", "SOURCE"), unsafe_allow_html=True)
+    with cfg4:
+        st.markdown(card_html("Massive Key", _credential_origin("MASSIVE_API_KEY"), "stocks · ETFs · indices · FX · crypto · futures", "green" if provider_config.get("massive") else "yellow", "SOURCE"), unsafe_allow_html=True)
+    with cfg5:
+        st.markdown(card_html("Databento Key", _credential_origin("DATABENTO_API_KEY"), "CME futures · L1", "green" if provider_config.get("databento") else "yellow", "SOURCE"), unsafe_allow_html=True)
+
+    configured_count = int(bool(provider_config.get("mt5"))) + int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
+    if configured_count < 1:
+        st.warning("No dedicated live source is available. Install the optional MT5 connector on the local Windows machine or configure Massive/Databento. yfinance remains a timestamp-correct reference fallback only and is never promoted to LIVE by a UI refresh.")
+
     pstat = pd.DataFrame(provider_status)
     if not pstat.empty:
-        pstat["state"] = pstat.apply(lambda r: "LIVE" if r.get("connected") and r.get("authenticated") else "NOT CONFIGURED" if not r.get("configured") else "RECONNECTING", axis=1)
+        pstat["state"] = pstat.apply(lambda r: "STREAMING" if r.get("connected") and r.get("authenticated") else "NOT CONFIGURED" if not r.get("configured") else "CONNECTING / RETRY", axis=1)
+        pstat["message_age_sec"] = pstat["last_message_at"].apply(_seconds_since)
         st.markdown("<div class='section-title' style='margin-top:8px'>Provider Connections</div>", unsafe_allow_html=True)
-        st.dataframe(pstat[["provider", "channel", "state", "last_message_at", "reconnects", "last_error"]], use_container_width=True, hide_index=True)
-    st.markdown("<div class='section-title' style='margin-top:8px'>Instrument Freshness</div>", unsafe_allow_html=True)
-    health_cols = [c for c in ["symbol", "name", "category", "market_state", "market_age_sec", "fetch_age_sec", "freshness", "source", "feed_mode", "provider_ts", "received_ts", "live_proxy_symbol", "live_proxy_age_sec", "source_ok"] if c in universe_df.columns]
-    render_editable_table(universe_df[health_cols].copy(), "data_health_table")
+        st.dataframe(pstat[["provider", "channel", "state", "message_age_sec", "last_message_at", "reconnects", "last_error"]], use_container_width=True, hide_index=True)
+
+    st.markdown("<div class='section-title' style='margin-top:8px'>Per-Instrument Always-On Clock</div>", unsafe_allow_html=True)
+    st.caption("DIRECT/BROKER LIVE = a real provider is publishing an actual level for this dashboard instrument now. OFFICIAL INDEX = the calculating index feed. REFERENCE/PROXY is used only when no direct real quote exists. The original official/reference value is always retained separately for audit.")
+    health_cols = [c for c in ["symbol", "name", "category", "market_state", "latest_close", "price_type", "active_provider_symbol", "reference_price", "reference_source", "market_age_sec", "fetch_age_sec", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "source", "feed_mode", "provider_ts", "received_ts", "source_ok"] if c in universe_df.columns]
+    health_view = universe_df[health_cols].copy()
+    if "monitor_age_sec" in health_view.columns:
+        health_view = health_view.sort_values(["monitor_age_sec", "symbol"], ascending=[False, True], na_position="first")
+    st.dataframe(health_view, use_container_width=True, hide_index=True, column_config=_table_column_config(list(health_view.columns)))
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Raw Data":
@@ -1617,7 +1935,7 @@ elif page == "Raw Data":
         "symbol": "SOURCE", "category": "DOMAIN", "latest_close": "VALUE", "change_pct": "Δ %",
         "market_age_sec": "MARKET AGE", "fetch_age_sec": "FETCH AGE", "freshness": "STATUS", "source": "FEED",
     })
-    raw_cols = [c for c in ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "market_state", "MARKET AGE", "FETCH AGE", "STATUS", "FEED", "feed_mode", "provider_ts", "received_ts", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "source_ok"] if c in raw_view.columns]
+    raw_cols = [c for c in ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "market_state", "MARKET AGE", "FETCH AGE", "STATUS", "FEED", "feed_mode", "provider_ts", "received_ts", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "monitor_source", "price_type", "active_provider_symbol", "reference_price", "reference_source", "reference_provider_ts", "source_ok"] if c in raw_view.columns]
     render_editable_table(raw_view[raw_cols].copy(), "raw_data_table")
     with st.expander("Selected raw payload", expanded=False):
         r = selected.to_dict()
@@ -1625,6 +1943,6 @@ elif page == "Raw Data":
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown(
-    f"<div class='footerbar'>Macro Regime Engine {APP_VERSION} · continuous provider hub · UI redraw {refresh_interval}s · active-market stale ceiling {MAX_DATA_AGE_SECONDS}s</div>",
+    f"<div class='footerbar'>Macro Regime Engine {APP_VERSION} · always-on provider hub · UI redraw {refresh_interval}s · active-market stale ceiling {MAX_DATA_AGE_SECONDS}s</div>",
     unsafe_allow_html=True,
 )
