@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover
     st_autorefresh = None
 
-APP_VERSION = "v8.7 Global Session Engine"
+APP_VERSION = "v8.8 All-Session NAS Engine"
 LOCAL_TZ = ZoneInfo("America/Toronto")
 REFRESH_SECONDS = 30
 
@@ -37,13 +37,14 @@ class Asset:
 UNIVERSE: List[Asset] = [
     # Index / index proxies
     Asset("^GSPC", "S&P 500", "Indexes", "Macro", "risk asset", 1),
-    Asset("^NDX", "Nasdaq 100", "Indexes", "Macro", "growth risk", 1),
-    Asset("QQQ", "Nasdaq ETF", "Indexes", "Macro", "tradeable NAS proxy", 1),
+    Asset("^NDX", "Nasdaq 100", "Indexes", "NY Cash Reference", "official NY cash index only", 1),
+    Asset("QQQ", "Nasdaq ETF", "Indexes", "Extended Hours", "pre-market / after-hours NAS proxy", 1),
     Asset("SPY", "S&P 500 ETF", "Indexes", "Macro", "tradeable SPX proxy", 1),
     Asset("RSP", "Equal Weight S&P", "Internals", "Internal", "breadth proxy", 1),
     Asset("IWM", "Russell 2000", "Indexes", "Macro", "small caps", 1),
     Asset("DIA", "Dow ETF", "Indexes", "Macro", "industrial index", 1),
-    Asset("NQ=F", "Nasdaq Futures", "Indexes", "Extended Hours", "overnight NAS proxy", 1),
+    Asset("NQ=F", "Nasdaq Futures", "Indexes", "Global Sessions", "primary all-session NAS driver", 1),
+    Asset("ES=F", "S&P Futures", "Indexes", "Global Sessions", "all-session SPX futures proxy", 1),
     # AI / tech / semis
     Asset("NVDA", "Nvidia", "AI / Tech", "AI", "AI leader", 1),
     Asset("MSFT", "Microsoft", "AI / Tech", "AI", "cloud / AI", 1),
@@ -196,9 +197,9 @@ UNIVERSE: List[Asset] = [
 ]
 
 ASSET_MAP = {a.symbol: a for a in UNIVERSE}
-RISK_ON = {"^GSPC", "SPY", "^NDX", "QQQ", "RSP", "IWM", "HYG", "JNK", "NVDA", "SMH", "SOXX", "XLK", "XLY", "XLF", "XLRE", "VNQ", "ITB", "BTC-USD"}
+RISK_ON = {"^GSPC", "SPY", "ES=F", "^NDX", "QQQ", "NQ=F", "RSP", "IWM", "HYG", "JNK", "NVDA", "SMH", "SOXX", "XLK", "XLY", "XLF", "XLRE", "VNQ", "ITB", "BTC-USD"}
 RISK_OFF = {"UUP", "DX-Y.NYB", "^TNX", "^FVX", "^IRX", "^VIX", "^VVIX", "^VIX9D", "^VIX3M", "^SKEW"}
-CORE_TILES = ["^GSPC", "QQQ", "RSP", "UUP", "^TNX", "^VIX", "GC=F", "CL=F", "NVDA", "SMH", "HYG", "BTC-USD", "XLRE", "XLV", "IBB", "LLY", "IHI", "ITA", "ICLN", "EEM"]
+CORE_TILES = ["NQ=F", "QQQ", "^NDX", "ES=F", "^GSPC", "RSP", "UUP", "^TNX", "^VIX", "GC=F", "CL=F", "NVDA", "SMH", "HYG", "BTC-USD", "XLRE", "XLV", "IBB", "LLY", "IHI", "ITA", "ICLN", "EEM"]
 
 NEWS_QUERIES = [
     "Federal Reserve markets", "CPI inflation stocks", "China semiconductor Nvidia", "oil prices geopolitics",
@@ -280,11 +281,11 @@ def fmt_minutes(mins: int) -> str:
 
 SESSION_DEFS = [
     {"name":"Asia", "window":"8:00 PM–3:00 AM ET", "start":"20:00", "end":"03:00", "driver":"Overnight risk tone, China/Japan, USD/JPY, commodities", "watch":"NQ Globex, USD/JPY, FXI/MCHI, copper, oil"},
-    {"name":"London / Europe", "window":"3:00 AM–11:30 AM ET", "start":"03:00", "end":"11:30", "driver":"DXY, European equities, bond/yield pressure", "watch":"DXY/UUP, VGK/FEZ/EWG, yields, gold, oil"},
-    {"name":"US Pre-Market", "window":"4:00 AM–9:30 AM ET", "start":"04:00", "end":"09:30", "driver":"QQQ/SPY premarket, NQ futures, news, data releases", "watch":"QQQ, SPY, NQ=F, NVDA, SMH, VIX"},
-    {"name":"NY Cash", "window":"9:30 AM–4:00 PM ET", "start":"09:30", "end":"16:00", "driver":"Main US liquidity and opening/closing range control", "watch":"QQQ, SPY, RSP, HYG, VIX, sectors"},
-    {"name":"US After-Hours", "window":"4:00 PM–8:00 PM ET", "start":"16:00", "end":"20:00", "driver":"Earnings, guidance, late news, position unwind", "watch":"QQQ, mega-cap tech, AI leaders, after-hours range"},
-    {"name":"Globex / Futures", "window":"6:00 PM–5:00 PM ET", "start":"18:00", "end":"17:00", "driver":"Overnight futures continuation and pre-NY pressure", "watch":"NQ=F, ES=F proxy via SPY/QQQ, yields, DXY"},
+    {"name":"London / Europe", "window":"3:00 AM–11:30 AM ET", "start":"03:00", "end":"11:30", "driver":"NQ futures, DXY, European equities, bond/yield pressure", "watch":"NQ=F, QQQ, DXY/UUP, VGK/FEZ/EWG, yields, gold, oil"},
+    {"name":"US Pre-Market", "window":"4:00 AM–9:30 AM ET", "start":"04:00", "end":"09:30", "driver":"NQ futures primary + QQQ pre-market proxy, news, data releases", "watch":"NQ=F, QQQ, SPY, NVDA, SMH, VIX"},
+    {"name":"NY Cash", "window":"9:30 AM–4:00 PM ET", "start":"09:30", "end":"16:00", "driver":"Official cash index + ETF/futures confirmation", "watch":"^NDX, QQQ, NQ=F, SPY, RSP, HYG, VIX, sectors"},
+    {"name":"US After-Hours", "window":"4:00 PM–8:00 PM ET", "start":"16:00", "end":"20:00", "driver":"QQQ after-hours proxy + NQ futures, earnings, late news", "watch":"QQQ, NQ=F, mega-cap tech, AI leaders, after-hours range"},
+    {"name":"Globex / Futures", "window":"6:00 PM–5:00 PM ET", "start":"18:00", "end":"17:00", "driver":"Primary overnight futures continuation and pre-NY pressure", "watch":"NQ=F, ES=F, QQQ, yields, DXY"},
     {"name":"Crypto", "window":"24/7", "start":"00:00", "end":"00:00", "driver":"Liquidity beta and speculative risk appetite", "watch":"BTC, ETH, SOL, COIN, MSTR"},
 ]
 
@@ -313,15 +314,15 @@ def session_tone_from_market(df: pd.DataFrame, session: str) -> Tuple[str, str]:
     if session == "Asia":
         syms = ["EWJ", "FXI", "MCHI", "EWH", "AUDUSD=X", "HG=F", "NQ=F"]
     elif session == "London / Europe":
-        syms = ["VGK", "FEZ", "EWG", "EWU", "UUP", "DX-Y.NYB", "GC=F", "CL=F"]
+        syms = ["NQ=F", "QQQ", "VGK", "FEZ", "EWG", "EWU", "UUP", "DX-Y.NYB", "GC=F", "CL=F"]
     elif session == "US Pre-Market":
         syms = ["QQQ", "SPY", "NQ=F", "NVDA", "SMH", "^VIX", "UUP", "^TNX"]
     elif session == "NY Cash":
-        syms = ["QQQ", "SPY", "RSP", "IWM", "HYG", "^VIX", "XLK", "XLF"]
+        syms = ["^NDX", "QQQ", "NQ=F", "SPY", "RSP", "IWM", "HYG", "^VIX", "XLK", "XLF"]
     elif session == "US After-Hours":
         syms = ["QQQ", "NQ=F", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "SMH"]
     elif session == "Globex / Futures":
-        syms = ["NQ=F", "QQQ", "UUP", "^TNX", "GC=F", "CL=F", "BTC-USD"]
+        syms = ["NQ=F", "ES=F", "QQQ", "UUP", "^TNX", "GC=F", "CL=F", "BTC-USD"]
     else:
         syms = ["BTC-USD", "ETH-USD", "SOL-USD", "COIN", "MSTR"]
     score = score_group(df, syms)
@@ -353,7 +354,7 @@ def session_range_from_series(s: pd.Series, start: str, end: str, date=None) -> 
 
 def nas_session_read(intra: Dict[str, pd.DataFrame]) -> Dict[str, Dict[str, object]]:
     out = {}
-    for sym in ["QQQ", "NQ=F", "^NDX"]:
+    for sym in ["NQ=F", "QQQ", "^NDX"]:
         df = intra.get(sym)
         if df is None or df.empty:
             continue
@@ -386,6 +387,78 @@ def nas_session_read(intra: Dict[str, pd.DataFrame]) -> Dict[str, Dict[str, obje
             "ranges": session_ranges,
         }
     return out
+
+def active_nas_driver_symbols(dt: datetime | None = None) -> Tuple[List[str], str, str]:
+    """Choose the correct NAS instrument for the current global session.
+
+    ^NDX is an official NY cash index reference. It is not the live driver for
+    Asia, London, pre-market, after-hours, or Globex. NQ=F is the primary
+    all-session driver; QQQ is the tradeable ETF proxy for US extended hours.
+    """
+    active = current_active_sessions(dt)
+    if "NY Cash" in active:
+        return ["^NDX", "QQQ", "NQ=F"], "NY Cash", "^NDX is official cash reference; QQQ and NQ confirm."
+    if "US Pre-Market" in active:
+        return ["NQ=F", "QQQ", "NVDA", "SMH"], "US Pre-Market", "NQ futures primary; QQQ pre-market proxy confirms."
+    if "US After-Hours" in active:
+        return ["QQQ", "NQ=F", "NVDA", "SMH"], "US After-Hours", "QQQ after-hours proxy + NQ futures; ^NDX is closed."
+    if "London / Europe" in active:
+        return ["NQ=F", "QQQ", "UUP", "^TNX"], "London / Europe", "NQ futures carries NAS through London; watch DXY/yields."
+    if "Asia" in active:
+        return ["NQ=F", "QQQ", "USDJPY=X", "FXI", "MCHI"], "Asia", "NQ futures carries NAS through Asia; watch China/Japan/FX."
+    if "Globex / Futures" in active:
+        return ["NQ=F", "ES=F", "QQQ", "UUP"], "Globex / Futures", "NQ futures is the live NAS driver outside cash hours."
+    return ["NQ=F", "QQQ", "^NDX"], "Global", "Use NQ=F live, QQQ as tradable proxy, ^NDX as cash reference."
+
+def market_row(df: pd.DataFrame, symbol: str) -> pd.Series | None:
+    if df.empty or "symbol" not in df.columns:
+        return None
+    sub = df[df["symbol"] == symbol]
+    if sub.empty:
+        return None
+    return sub.iloc[0]
+
+def nas_live_composite(df: pd.DataFrame) -> Dict[str, object]:
+    symbols, session, rule = active_nas_driver_symbols()
+    primary = None
+    for sym in symbols:
+        row = market_row(df, sym)
+        if row is not None:
+            primary = row
+            break
+    if primary is None:
+        return {"session": session, "primary": "NQ=F", "price": np.nan, "change_pct": np.nan, "score": 0.0, "state": "WAITING", "rule": rule, "quality": "Waiting", "reason": "NQ/QQQ live data has not loaded yet."}
+    score = float(primary.get("score", 0.0))
+    chg = float(primary.get("change_pct", 0.0))
+    confirms, contradictions = [], []
+    for sym in ["NQ=F", "QQQ", "NVDA", "SMH", "UUP", "^TNX", "^VIX", "HYG", "RSP"]:
+        row = market_row(df, sym)
+        if row is None:
+            continue
+        s = float(row.get("score", 0.0))
+        if abs(s) >= 25:
+            confirms.append(f"{sym} {row.get('state','')}")
+        else:
+            contradictions.append(f"{sym} mixed")
+    quality = "Strong" if len(confirms) >= 5 else "Medium" if len(confirms) >= 3 else "Weak / Mixed"
+    reason = "; ".join(confirms[:5]) if confirms else "No clean cross-market confirmation yet."
+    return {
+        "session": session,
+        "primary": str(primary.get("symbol", symbols[0])),
+        "price": float(primary.get("latest_close", np.nan)),
+        "change_pct": chg,
+        "score": score,
+        "state": str(primary.get("state", "MIXED")),
+        "rule": rule,
+        "quality": quality,
+        "reason": reason,
+        "confirms": confirms,
+        "contradictions": contradictions,
+    }
+
+def nas_query_terms(q: str) -> bool:
+    q = q.lower().strip().replace("^", "")
+    return q in {"ndx", "nas", "nasdaq", "nasdaq 100", "nq", "nq=f", "qqq", "nas100", "us100"}
 
 def chunked(seq: List[str], n: int) -> Iterable[List[str]]:
     for i in range(0, len(seq), n):
@@ -517,7 +590,7 @@ def score_group(df: pd.DataFrame, symbols: List[str]) -> float:
 
 def calc_scores(df: pd.DataFrame) -> Dict[str, float]:
     scores = {
-        "Macro": score_group(df, ["^GSPC", "SPY", "^NDX", "QQQ", "RSP", "IWM", "HYG", "JNK", "UUP", "^TNX", "^VIX"]),
+        "Macro": score_group(df, ["^GSPC", "SPY", "ES=F", "^NDX", "QQQ", "NQ=F", "RSP", "IWM", "HYG", "JNK", "UUP", "^TNX", "^VIX"]),
         "AI": score_group(df, ["NVDA", "MSFT", "AAPL", "AMZN", "GOOGL", "META", "AMD", "AVGO", "ORCL", "PLTR", "SMH", "SOXX", "TSM", "ASML"]),
         "Internals": score_group(df, ["RSP", "IWM", "HYG", "JNK", "KRE", "KBE", "XRT", "IYT", "XLK", "XLF", "XLRE"]),
         "Liquidity": score_group(df, ["UUP", "DX-Y.NYB", "^TNX", "^FVX", "^IRX", "TLT", "IEF", "HYG", "JNK"]),
@@ -1020,20 +1093,29 @@ def render_session_map():
 
 
 def render_nas_session_panel():
-    st.markdown("<div class='section-title'>NAS / QQQ SESSION READ</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>NAS LIVE SESSION READ</div>", unsafe_allow_html=True)
+    comp = nas_live_composite(market)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Active NAS Session", comp.get("session", "Global"))
+    c2.metric("Primary Driver", comp.get("primary", "NQ=F"), comp.get("state", ""))
+    c3.metric("Driver Price", fmt_num(float(comp.get("price", np.nan))), f"{float(comp.get('change_pct', 0.0)):+.2f}%")
+    c4.metric("Score Quality", comp.get("quality", "Waiting"), f"Score {float(comp.get('score', 0.0)):.1f}")
+    st.caption(comp.get("rule", "NQ=F drives non-NY sessions; QQQ confirms extended hours; ^NDX is cash only."))
+    st.caption("Reason: " + str(comp.get("reason", "Waiting for cross-market confirmation.")))
     read = nas_session_read(intra)
     if not read:
-        st.warning("NAS/QQQ session data not loaded yet. Use QQQ/NQ live feed when available.")
+        st.warning("NAS/QQQ session data not loaded yet. Use NQ=F/QQQ live feed when available.")
         return
-    tabs = st.tabs([sym for sym in ["QQQ", "NQ=F", "^NDX"] if sym in read])
-    for tab, sym in zip(tabs, [sym for sym in ["QQQ", "NQ=F", "^NDX"] if sym in read]):
+    st.info("Instrument rule: Asia/London/Globex = NQ=F primary. Pre/After-hours = QQQ + NQ=F. NY Cash = ^NDX reference with QQQ/NQ confirmation.")
+    tabs = st.tabs([sym for sym in ["NQ=F", "QQQ", "^NDX"] if sym in read])
+    for tab, sym in zip(tabs, [sym for sym in ["NQ=F", "QQQ", "^NDX"] if sym in read]):
         with tab:
             payload = read[sym]
             c1, c2, c3 = st.columns(3)
             c1.metric("Last", fmt_num(float(payload.get("last", np.nan))), payload.get("last_time", "N/A"))
             c2.metric("1H Close", fmt_num(float(payload.get("1H_close", np.nan))))
             c3.metric("4H Close", fmt_num(float(payload.get("4H_close", np.nan))))
-            st.caption("Use these ranges for session-aware targets/reclaims: Asia → London → Pre-Market → NY Cash → After-Hours → Globex.")
+            st.caption("Use these ranges for session-aware targets/reclaims. ^NDX is cash only; NQ=F/QQQ carry the live extended-hours read.")
             rcols = st.columns(3)
             for i, (label, rng) in enumerate(payload.get("ranges", {}).items()):
                 hi, lo, last = rng.get("high", np.nan), rng.get("low", np.nan), rng.get("last", None)
@@ -1201,27 +1283,44 @@ elif page == "Events":
             small_card(str(r.event), f"{r.days} days", f"{r.time} · {r.impact}", "warn" if r.impact == "HIGH" else "")
 
 elif page == "Search":
-    q = (global_query or st.text_input("Search", placeholder="NDX, real estate, gold, credit, semis, yields")).lower().strip()
+    q = (global_query or st.text_input("Search", placeholder="NDX, NQ, QQQ, real estate, gold, credit, semis, yields")).lower().strip()
     st.markdown(f"<div class='section-title'>ACTION SEARCH {q.upper() if q else ''}</div>", unsafe_allow_html=True)
     if q:
-        mask = market.apply(lambda r: q in str(r.symbol).lower() or q in str(r["name"]).lower() or q in str(r.category).lower() or q in str(r.role).lower(), axis=1)
-        res = market[mask]
-        if not res.empty:
-            selected_sym = str(res.iloc[0].symbol)
-            read = asset_action(selected_sym, market, causes)
-            c1, c2 = st.columns([1,1])
-            with c1: clean_card("ACTION READ", read["now"], f"Cause: {read['cause']}")
-            with c2: clean_card("TARGET", read["target"], f"Related: {read['related']}", "warn")
-            c3, c4, c5 = st.columns(3)
-            with c3: small_card("CONFIRM", read["confirm"], "", "good")
-            with c4: small_card("INVALIDATE", read["invalidate"], "", "bad")
-            with c5: small_card("AVOID", read["avoid"], "", "warn")
-            st.markdown("<div class='section-title'>RELATED MATCHES</div>", unsafe_allow_html=True)
-            render_asset_strip(res.symbol.tolist(), ncols=4)
-            with st.expander("Direct match table", expanded=False):
-                st.dataframe(res[["symbol","name","category","latest_close","change_pct","score","state","role"]], use_container_width=True, hide_index=True)
+        if nas_query_terms(q):
+            comp = nas_live_composite(market)
+            st.markdown("<div class='section-title'>NAS LIVE COMPOSITE</div>", unsafe_allow_html=True)
+            c1, c2, c3 = st.columns(3)
+            with c1: clean_card("ACTIVE SESSION", str(comp.get("session", "Global")), str(comp.get("rule", "")))
+            with c2: clean_card("PRIMARY LIVE DRIVER", str(comp.get("primary", "NQ=F")), f"Price {fmt_num(float(comp.get('price', np.nan)))} · {float(comp.get('change_pct',0)):+.2f}%")
+            with c3: clean_card("SCORE QUALITY", str(comp.get("quality", "Waiting")), f"Score {float(comp.get('score',0)):.1f} · {comp.get('state','')}", "warn")
+            c4, c5, c6 = st.columns(3)
+            with c4: small_card("CONFIRM", "; ".join(comp.get("confirms", [])[:3]) or "Need NQ/QQQ/AI confirmation", "", "good")
+            with c5: small_card("CONTRADICT", "; ".join(comp.get("contradictions", [])[:3]) or "No major contradictions loaded", "", "bad")
+            with c6: small_card("AVOID", "Do not use ^NDX as the live extended-hours driver", "Use NQ=F/QQQ outside NY cash", "warn")
+            st.markdown("<div class='section-title'>RELATED NAS INSTRUMENTS</div>", unsafe_allow_html=True)
+            related = [s for s in ["NQ=F", "QQQ", "^NDX", "NVDA", "SMH", "SOXX", "UUP", "^TNX", "^VIX", "RSP", "HYG"] if s in set(market.symbol)]
+            render_asset_strip(related, ncols=4)
+            with st.expander("Instrument rule", expanded=True):
+                st.write("Asia / London / Globex use NQ=F as the primary NAS driver. US pre-market and after-hours use QQQ + NQ=F. NY cash uses ^NDX as official reference with QQQ/NQ confirmation.")
         else:
-            st.info("No direct match. Try QQQ, NDX, real estate, healthcare, biotech, pharma, science, defense, clean energy, semis, gold, yields, credit, volatility, oil.")
+            mask = market.apply(lambda r: q in str(r.symbol).lower() or q in str(r["name"]).lower() or q in str(r.category).lower() or q in str(r.role).lower(), axis=1)
+            res = market[mask]
+            if not res.empty:
+                selected_sym = str(res.iloc[0].symbol)
+                read = asset_action(selected_sym, market, causes)
+                c1, c2 = st.columns([1,1])
+                with c1: clean_card("ACTION READ", read["now"], f"Cause: {read['cause']}")
+                with c2: clean_card("TARGET", read["target"], f"Related: {read['related']}", "warn")
+                c3, c4, c5 = st.columns(3)
+                with c3: small_card("CONFIRM", read["confirm"], "", "good")
+                with c4: small_card("INVALIDATE", read["invalidate"], "", "bad")
+                with c5: small_card("AVOID", read["avoid"], "", "warn")
+                st.markdown("<div class='section-title'>RELATED MATCHES</div>", unsafe_allow_html=True)
+                render_asset_strip(res.symbol.tolist(), ncols=4)
+                with st.expander("Direct match table", expanded=False):
+                    st.dataframe(res[["symbol","name","category","latest_close","change_pct","score","state","role"]], use_container_width=True, hide_index=True)
+            else:
+                st.info("No direct match. Try QQQ, NDX, NQ, real estate, healthcare, biotech, pharma, science, defense, clean energy, semis, gold, yields, credit, volatility, oil.")
 
 elif page == "Data Health":
     st.markdown("<div class='section-title'>DATA HEALTH</div>", unsafe_allow_html=True)

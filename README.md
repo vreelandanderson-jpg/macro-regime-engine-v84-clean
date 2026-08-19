@@ -1,36 +1,42 @@
-# Macro Regime Engine v8.7 Global Session Engine
+# Macro Regime Engine v8.8 — All-Session NAS Engine
 
-Clean Streamlit action-console build.
+Clean Streamlit repo package.
 
-## What v8.7 adds
+## v8.8 fix
 
-- Global Session Engine
-- Live Session Map: Asia, London/Europe, US Pre-Market, NY Cash, US After-Hours, Globex/Futures, Crypto
-- Extended hours is no longer shown as a simple column
-- NAS/QQQ Session Read with QQQ, NQ futures, and NDX reference
-- Pre-market, NY cash, after-hours, overnight/Globex, Asia, and London session ranges
-- 1H and 4H close tracking for NAS/QQQ/NQ where feed provides intraday data
-- Session-aware market read that feeds action console context
+NDX/NAS live tracking is no longer treated as NY-cash-only.
 
-## Kept
+Instrument rules:
+
+- `NQ=F` = primary NAS live driver for Asia, London, Globex, overnight, and non-cash sessions.
+- `QQQ` = tradable US pre-market and after-hours NAS proxy.
+- `^NDX` = official NY cash index reference only.
+
+## Included
 
 - Action Console
-- Gauges
-- Selectable live tiles
 - Active Cause Engine
-- Full universe including real estate, healthcare/science, sectors, currencies, commodities, crypto, global markets
-- Toronto/Eastern 12-hour time
-- Live-only setup
+- Full universe coverage
+- Real estate / housing
+- Healthcare / science / biotech / pharma
+- Global session map
+- NAS all-session driver panel
+- NAS / QQQ / NQ session range panel
+- Selectable live tiles
+- Gauges
+- Toronto / Eastern 12-hour time
 - No FRED
 - No demo logic
 
-## Streamlit Cloud
+## GitHub upload files
 
-Upload these files only:
+Upload only these files to Streamlit/GitHub:
 
-- app.py
-- README.md
-- requirements.txt
-- .gitignore
+- `app.py`
+- `requirements.txt`
+- `README.md`
+- `.gitignore`
+
+## Deploy
 
 Main file path: `app.py`
