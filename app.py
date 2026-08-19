@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v9.3"
+APP_VERSION = "v9.4"
 MAX_DATA_AGE_SECONDS = 25
 CACHE_TTL_SECONDS = 20
 DEFAULT_REFRESH_SECONDS = 20
@@ -112,7 +112,7 @@ html, body, [data-testid="stAppViewContainer"]{
 [data-testid="stDataFrame"]{font-size:11px!important;}
 [data-testid="stExpander"]{border:1px solid #173957!important;border-radius:11px!important;background:#06131f!important;}
 [data-testid="stPopover"] button{min-height:32px!important;}
-/* v9.3 interactive strip cards */
+/* v9.4 persistent interactive strip cards */
 [data-testid="stExpander"]{margin:.32rem 0!important;border:1px solid #173957!important;border-radius:13px!important;background:linear-gradient(90deg,rgba(7,24,39,.98),rgba(5,14,25,.98))!important;overflow:hidden;box-shadow:0 0 12px rgba(0,0,0,.20);}
 [data-testid="stExpander"]:hover{border-color:#2a84b8!important;box-shadow:0 0 14px rgba(49,198,255,.10);}
 [data-testid="stExpander"] summary{padding:.62rem .8rem!important;min-height:42px!important;}
@@ -528,7 +528,7 @@ def mini_instrument_html(row: pd.Series, selected: bool = False) -> str:
     return (
         f"<div class='{cls}'><div class='mini-symbol'>{row['symbol']}</div>"
         f"<div class='mini-price'>{short_num(row['latest_close'])}</div>"
-        f"<div class='mini-change {tone}'>{pct:+.2f}%</div></div>"
+        f"<div class='mini-change {tone}'>{format_change(pct)}</div></div>"
     )
 
 
@@ -543,9 +543,12 @@ def _display_value(key: str, value) -> str:
         pass
     if isinstance(value, (np.floating, float)):
         if key in {"change_pct", "session_pct"}:
+            mode = st.session_state.get("global_change_format", "Percentage")
+            if mode == "Decimal":
+                return f"{float(value):+.6f}"
             return f"{float(value):+.4f}%"
         if key == "score":
-            return f"{float(value):+.3f}"
+            return format_score(float(value))
         if key == "volume":
             return f"{float(value):,.0f}"
         return short_num(float(value))
@@ -556,55 +559,117 @@ def _display_value(key: str, value) -> str:
     return str(value)
 
 
+def format_score(value: float) -> str:
+    mode = st.session_state.get("global_score_format", "Percentage")
+    if mode == "Percentage":
+        return f"{float(value):+.2f}%"
+    if mode == "Whole":
+        return f"{float(value):+.0f}"
+    return f"{float(value):+.3f}"
+
+
+def format_change(value: float) -> str:
+    mode = st.session_state.get("global_change_format", "Percentage")
+    if mode == "Decimal":
+        return f"{float(value):+.6f}"
+    return f"{float(value):+.4f}%"
+
+
+def _table_column_config(columns: list[str]) -> dict:
+    cfg = {}
+    score_mode = st.session_state.get("global_score_format", "Percentage")
+    change_mode = st.session_state.get("global_change_format", "Percentage")
+    for col in columns:
+        low = str(col).lower()
+        if low == "score":
+            fmt = "%.2f%%" if score_mode == "Percentage" else "%.0f" if score_mode == "Whole" else "%.3f"
+            cfg[col] = st.column_config.NumberColumn(str(col), format=fmt)
+        elif low in {"change_pct", "session_pct", "δ %", "change %", "change"}:
+            fmt = "%.4f%%" if change_mode == "Percentage" else "%.6f"
+            cfg[col] = st.column_config.NumberColumn(str(col), format=fmt)
+        elif low in {"age_sec", "age sec"}:
+            cfg[col] = st.column_config.NumberColumn(str(col), format="%d")
+    return cfg
+
+
+def render_editable_table(df: pd.DataFrame, key: str, *, disabled: list[str] | None = None) -> pd.DataFrame:
+    """Interactive working table. Edits are local to the UI and do not mutate the live market snapshot."""
+    return st.data_editor(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        key=key,
+        disabled=disabled or [],
+        column_config=_table_column_config(list(df.columns)),
+    )
+
+
 def strip_summary(row: pd.Series) -> str:
     pct = float(row.get("change_pct", 0.0))
-    sign = "+" if pct > 0 else ""
     return (
         f"{row.get('symbol','—')}  ·  {row.get('name','—')}   |   "
-        f"{short_num(row.get('latest_close'))}   {sign}{pct:.2f}%   ·   "
+        f"{short_num(row.get('latest_close'))}   {format_change(pct)}   ·   "
         f"{row.get('state','—')}   ·   {int(row.get('age_sec',999)):02d}s"
     )
 
 
 def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[str] | None = None) -> None:
-    """Primary command-center view: compact strip, click to expose every available field."""
+    """Persistent strip cards: open state survives every timed/manual refresh until the user closes it."""
     if view.empty:
         st.info("No instruments match this filter.")
         return
     mode = st.radio(
         "View",
-        ["Strip Cards", "Raw Table"],
+        ["Strip Cards", "Editable Table", "Raw Table"],
         index=0,
         horizontal=True,
         key=f"{key_prefix}_view_mode",
         label_visibility="collapsed",
     )
-    if mode == "Raw Table":
+    if mode in {"Editable Table", "Raw Table"}:
         cols = raw_columns or [c for c in view.columns if not str(c).startswith("_")]
         cols = [c for c in cols if c in view.columns]
-        st.dataframe(view[cols], use_container_width=True, hide_index=True)
+        if mode == "Editable Table":
+            st.caption("Editable working table · display edits are local and do not overwrite the synchronized market feed.")
+            render_editable_table(view[cols].copy(), f"{key_prefix}_editable_table")
+        else:
+            st.dataframe(
+                view[cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config=_table_column_config(cols),
+            )
         return
 
     st.markdown(
         "<div class='strip-toolbar'>"
-        "<span class='strip-pill'>CLICK ANY STRIP → FULL DATA</span>"
+        "<span class='strip-pill'>OPEN STATE PERSISTS THROUGH REFRESH</span>"
         "<span class='strip-pill'>NO FIELDS REMOVED</span>"
-        "<span class='strip-pill'>RAW TABLE AVAILABLE</span>"
+        "<span class='strip-pill'>EDITABLE + RAW TABLES AVAILABLE</span>"
         "</div>",
         unsafe_allow_html=True,
     )
     for idx, (_, row) in enumerate(view.iterrows()):
         symbol = str(row.get("symbol", "—"))
-        with st.expander(strip_summary(row), expanded=False):
+        safe_symbol_key = "".join(ch if ch.isalnum() else "_" for ch in symbol)
+        open_key = f"strip_open__{key_prefix}__{safe_symbol_key}"
+        if open_key not in st.session_state:
+            st.session_state[open_key] = False
+        chevron = "▼" if st.session_state[open_key] else "▶"
+        if st.button(f"{chevron}  {strip_summary(row)}", key=f"strip_toggle__{key_prefix}__{safe_symbol_key}", use_container_width=True):
+            st.session_state[open_key] = not st.session_state[open_key]
+
+        if st.session_state[open_key]:
             a, b, c, d, e = st.columns([1.1, 1.15, 1.05, 1.05, .8])
             with a:
                 st.markdown(card_html("Price", short_num(row.get("latest_close")), str(row.get("category", "")), "cyan"), unsafe_allow_html=True)
             with b:
                 pct = float(row.get("change_pct", 0.0))
-                st.markdown(card_html("Change", f"{pct:+.4f}%", f"session {float(row.get('session_pct',0.0)):+.4f}%", "green" if pct > 0 else "red" if pct < 0 else "yellow"), unsafe_allow_html=True)
+                st.markdown(card_html("Change", format_change(pct), f"session {format_change(float(row.get('session_pct',0.0)))}", "green" if pct > 0 else "red" if pct < 0 else "yellow"), unsafe_allow_html=True)
             with c:
                 score = float(row.get("score", 0.0))
-                st.markdown(card_html("Score", f"{score:+.3f}", str(row.get("quality", "—")), color_for(score)), unsafe_allow_html=True)
+                st.markdown(card_html("Score", format_score(score), str(row.get("quality", "—")), color_for(score)), unsafe_allow_html=True)
             with d:
                 st.markdown(card_html("State", str(row.get("state", "—")), str(row.get("freshness", "—")), color_for(float(row.get("score",0.0)))), unsafe_allow_html=True)
             with e:
@@ -622,6 +687,12 @@ def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[st
                 )
             cells.append("</div>")
             st.markdown("".join(cells), unsafe_allow_html=True)
+
+            table_cols = raw_columns or [c for c in view.columns if not str(c).startswith("_")]
+            table_cols = [c for c in table_cols if c in view.columns]
+            with st.popover("EDIT / FORMAT THIS INSTRUMENT", use_container_width=True):
+                one_row = pd.DataFrame([{c: row.get(c) for c in table_cols}])
+                render_editable_table(one_row, f"{key_prefix}_row_editor_{safe_symbol_key}")
 
 
 def _first_friday(year: int, month: int) -> date:
@@ -691,7 +762,7 @@ def health_card(snapshot_age: int) -> str:
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.3</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.4</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -702,6 +773,22 @@ def render_sidebar() -> tuple[str, bool, int]:
         auto = st.toggle("Auto refresh", value=True)
         interval = st.selectbox("Refresh", [10, 15, 20, 25], index=2, format_func=lambda x: f"{x} sec")
         st.caption("All visible data uses one snapshot · SLA ≤25s")
+        with st.expander("DISPLAY / TABLES", expanded=False):
+            st.selectbox(
+                "Score format",
+                ["Percentage", "Decimal", "Whole"],
+                index=0,
+                key="global_score_format",
+                help="Applies everywhere: strip cards, expanded fields, editable tables and raw tables.",
+            )
+            st.selectbox(
+                "Change format",
+                ["Percentage", "Decimal"],
+                index=0,
+                key="global_change_format",
+                help="Applies everywhere live change/session values are displayed.",
+            )
+            st.caption("Formatting is global across all modules, not page-specific.")
         return page, auto, int(interval)
 
 
@@ -712,7 +799,7 @@ if "last_manual_update" not in st.session_state:
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v93")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v94")
 
 # One synchronized universe fetch drives every module. No page has its own independent data clock.
 raw_universe = fetch_universe_snapshot(tuple(SYMBOLS))
@@ -784,9 +871,9 @@ if page == "Dashboard":
                   <div class='statusline'><div class='big'>{selected['symbol']}</div><span class='small'>{selected['name']}</span></div>
                   <div class='subvalue'>{selected['role']}</div>
                   <div style='font-size:30px;font-weight:950;margin-top:9px;white-space:nowrap'>{short_num(selected['latest_close'])}</div>
-                  <div class='{tone}' style='font-size:14px;font-weight:900'>{pct:+.2f}%</div>
+                  <div class='{tone}' style='font-size:14px;font-weight:900'>{format_change(pct)}</div>
                   <div class='metric-grid'>
-                    <div class='metric-cell'><div class='metric-label'>Score</div><div class='metric-value {color_for(selected['score'])}'>{selected['score']:.0f}</div></div>
+                    <div class='metric-cell'><div class='metric-label'>Score</div><div class='metric-value {color_for(selected['score'])}'>{format_score(float(selected['score']))}</div></div>
                     <div class='metric-cell'><div class='metric-label'>Quality</div><div class='metric-value'>{selected['quality']}</div></div>
                     <div class='metric-cell'><div class='metric-label'>Confidence</div><div class='metric-value green'>{conf}%</div></div>
                     <div class='metric-cell'><div class='metric-label'>State</div><div class='metric-value {color_for(selected['score'])}'>{selected['state']}</div></div>
@@ -829,7 +916,8 @@ if page == "Dashboard":
                 )
                 with st.popover("Open flow", use_container_width=True):
                     st.write("Flow proxy uses synchronized price, volume, breadth and related-asset agreement from the active snapshot.")
-                    st.dataframe(rel_df[["symbol", "change_pct", "score", "state"]].head(10), use_container_width=True, hide_index=True)
+                    mini_cols = ["symbol", "change_pct", "score", "state"]
+                    st.dataframe(rel_df[mini_cols].head(10), use_container_width=True, hide_index=True, column_config=_table_column_config(mini_cols))
             with c2:
                 st.markdown(
                     f"<div class='card compact'><div class='section-title'>Instrument Pressure</div>"
@@ -841,7 +929,7 @@ if page == "Dashboard":
                 )
                 with st.popover("Open pressure", use_container_width=True):
                     st.caption("Options pressure remains proxy-grade until a dedicated options feed is connected.")
-                    st.metric("Composite pressure", f"{float(selected['score']):.0f}")
+                    st.metric("Composite pressure", format_score(float(selected['score'])))
             with c3:
                 st.markdown(
                     f"<div class='card compact'><div class='section-title'>Active Driver</div>"
@@ -853,7 +941,7 @@ if page == "Dashboard":
                 )
                 with st.popover("Open driver", use_container_width=True):
                     drivers = universe_df[universe_df["symbol"].isin(["DX-Y.NYB", "^TNX", "^VIX", "SMH", "HYG"])][["symbol", "name", "change_pct", "score", "state"]]
-                    st.dataframe(drivers, use_container_width=True, hide_index=True)
+                    st.dataframe(drivers, use_container_width=True, hide_index=True, column_config=_table_column_config(list(drivers.columns)))
 
         with right:
             st.markdown(health_card(snapshot_age), unsafe_allow_html=True)
@@ -935,11 +1023,12 @@ if page == "Dashboard":
             cat_summary = universe_df.groupby("category", as_index=False).agg(score=("score", "mean"), change_pct=("change_pct", "mean"))
             cat_summary["state"] = cat_summary["score"].apply(state_for)
             cat_summary = cat_summary.sort_values("score", ascending=False)
-            st.dataframe(cat_summary, use_container_width=True, hide_index=True)
+            st.dataframe(cat_summary, use_container_width=True, hide_index=True, column_config=_table_column_config(list(cat_summary.columns)))
 
     with diag_tab:
         st.markdown("<div class='shell'><div class='section-title'>Selected Instrument · synchronized direct data</div>", unsafe_allow_html=True)
-        st.dataframe(rel_df[["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "age_sec", "source", "role"]], use_container_width=True, hide_index=True)
+        diag_cols = ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "age_sec", "source", "role"]
+        render_editable_table(rel_df[diag_cols].copy(), "dashboard_diagnostics_table")
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1034,7 +1123,7 @@ elif page == "Data Health":
     st.markdown(health_card(snapshot_age), unsafe_allow_html=True)
     st.caption("Refresh cadence is capped at 25 seconds for every tier. Dashboard freshness measures the app snapshot age; upstream provider latency is separate.")
     health_df = universe_df[["symbol", "name", "category", "age_sec", "freshness", "source", "source_ok"]].copy()
-    st.dataframe(health_df, use_container_width=True, hide_index=True)
+    render_editable_table(health_df, "data_health_table")
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Raw Data":
@@ -1055,7 +1144,8 @@ elif page == "Raw Data":
         "symbol": "SOURCE", "category": "DOMAIN", "latest_close": "VALUE", "change_pct": "Δ %",
         "age_sec": "AGE SEC", "freshness": "STATUS", "source": "FEED",
     })
-    st.dataframe(raw_view[["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "volume", "AGE SEC", "STATUS", "FEED", "source_ok"]], use_container_width=True, hide_index=True)
+    raw_cols = ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "volume", "AGE SEC", "STATUS", "FEED", "source_ok"]
+    render_editable_table(raw_view[raw_cols].copy(), "raw_data_table")
     with st.expander("Selected raw payload", expanded=False):
         r = selected.to_dict()
         st.json({k: (float(v) if isinstance(v, np.floating) else int(v) if isinstance(v, np.integer) else v) for k, v in r.items()})
