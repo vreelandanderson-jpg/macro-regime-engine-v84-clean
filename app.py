@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
@@ -10,6 +11,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+from live_feeds import LiveMarketHub, LIVE_PROXY_MAP
 
 try:
     import yfinance as yf
@@ -23,10 +26,10 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v9.5"
+APP_VERSION = "v9.7"
 MAX_DATA_AGE_SECONDS = 25
 CACHE_TTL_SECONDS = 20
-DEFAULT_REFRESH_SECONDS = 20
+DEFAULT_REFRESH_SECONDS = 2
 
 st.set_page_config(
     page_title=f"Macro Regime Engine {APP_VERSION}",
@@ -112,7 +115,7 @@ html, body, [data-testid="stAppViewContainer"]{
 [data-testid="stDataFrame"]{font-size:11px!important;}
 [data-testid="stExpander"]{border:1px solid #173957!important;border-radius:11px!important;background:#06131f!important;}
 [data-testid="stPopover"] button{min-height:32px!important;}
-/* v9.5 persistent interactive strip cards + live volume diagnostics */
+/* persistent interactive strip cards + live volume diagnostics */
 [data-testid="stExpander"]{margin:.32rem 0!important;border:1px solid #173957!important;border-radius:13px!important;background:linear-gradient(90deg,rgba(7,24,39,.98),rgba(5,14,25,.98))!important;overflow:hidden;box-shadow:0 0 12px rgba(0,0,0,.20);}
 [data-testid="stExpander"]:hover{border-color:#2a84b8!important;box-shadow:0 0 14px rgba(49,198,255,.10);}
 [data-testid="stExpander"] summary{padding:.62rem .8rem!important;min-height:42px!important;}
@@ -244,7 +247,7 @@ UNIVERSE: list[Instrument] = [
 SYMBOLS = list(dict.fromkeys(x.symbol for x in UNIVERSE))
 LOOKUP = {x.symbol.upper(): x for x in UNIVERSE}
 ALIASES = {
-    "NDX": "NQ=F", "NAS": "NQ=F", "NASDAQ": "NQ=F", "NAS100": "NQ=F", "NQ": "NQ=F",
+    "NDX": "^NDX", "NASDAQ CASH": "^NDX", "NQ CASH": "^NDX", "NAS": "NQ=F", "NASDAQ": "NQ=F", "NAS100": "NQ=F", "NQ": "NQ=F",
     "SPX": "ES=F", "S&P": "ES=F", "SP500": "ES=F", "ES": "ES=F",
     "GOLD": "GC=F", "GC": "GC=F", "OIL": "CL=F", "CL": "CL=F", "DXY": "DX-Y.NYB", "VIX": "^VIX",
     "REAL ESTATE": "XLRE", "HEALTHCARE": "XLV", "SCIENCE": "IBB", "BIOTECH": "XBI", "AI": "NVDA",
@@ -308,20 +311,14 @@ def safe_symbol(query: str | None) -> str:
 
 
 def fallback_row(sym: str, snapshot_iso: str) -> dict:
-    seed = abs(hash(sym)) % 1000
-    base = {
-        "NQ=F": 18760, "ES=F": 5852, "QQQ": 472, "SPY": 582, "DX-Y.NYB": 104.6, "^TNX": 4.54,
-        "^VIX": 22.8, "GC=F": 3336, "CL=F": 61.9, "BTC-USD": 107842, "NVDA": 218, "SMH": 561,
-        "RSP": 177, "HYG": 79.5,
-    }.get(sym, 50 + seed / 8)
-    pct = ((seed % 31) - 15) / 10
+    """Compatibility constructor for unavailable data. Never manufactures prices."""
     return {
-        "symbol": sym, "latest_close": float(base), "change_pct": float(pct), "session_pct": float(pct * 1.1),
-        # Fallback rows must never manufacture traded volume.
+        "symbol": sym, "latest_close": np.nan, "change_pct": np.nan, "session_pct": np.nan,
         "volume": np.nan, "volume_1m": np.nan, "session_volume": np.nan,
         "relative_volume": np.nan, "volume_delta_pct": np.nan,
-        "volume_source": "N/A · fallback", "volume_proxy_symbol": "",
-        "updated": snapshot_iso, "source": "fallback", "source_ok": False,
+        "volume_source": "N/A", "volume_proxy_symbol": "",
+        "provider_ts": None, "received_ts": snapshot_iso, "updated": None,
+        "source": "unavailable", "source_ok": False, "feed_mode": "UNAVAILABLE",
     }
 
 
@@ -375,50 +372,192 @@ def _apply_volume_proxies(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
-    """One synchronized universe snapshot. All dashboard layers derive from this exact frame."""
-    snapshot_iso = now_et().isoformat()
+    """Public-feed baseline used only when a dedicated live provider has no fresh event.
+
+    Provider timestamps come from the actual last bar. Missing symbols are retried
+    individually. Failed symbols remain unavailable; no synthetic market values exist.
+    """
+    received_iso = now_et().isoformat()
     rows: list[dict] = []
+    frames: dict[str, pd.DataFrame] = {}
     if yf is not None:
         try:
             data = yf.download(
                 list(symbols), period="1d", interval="1m", group_by="ticker", progress=False,
                 prepost=True, threads=True, auto_adjust=False,
             )
-            snapshot_iso = now_et().isoformat()
             for sym in symbols:
                 try:
                     frame = data.copy() if len(symbols) == 1 else data[sym].copy()
                     frame = frame.dropna(how="all")
-                    if frame.empty:
-                        raise ValueError("empty")
-                    close = frame["Close"].dropna()
-                    volume = frame["Volume"] if "Volume" in frame else pd.Series(dtype=float)
-                    if close.empty:
-                        raise ValueError("no close")
-                    last = float(close.iloc[-1])
-                    prev = float(close.iloc[-2]) if len(close) > 1 else last
-                    first = float(close.iloc[0])
-                    pct = ((last / prev) - 1) * 100 if prev else 0.0
-                    session_pct = ((last / first) - 1) * 100 if first else 0.0
-                    vm = _volume_metrics(volume)
-                    rows.append({
-                        "symbol": sym, "latest_close": last, "change_pct": pct, "session_pct": session_pct,
-                        "volume": vm["session_volume"], **vm,
-                        "volume_source": "Actual" if pd.notna(vm["session_volume"]) else "N/A",
-                        "volume_proxy_symbol": "",
-                        "updated": snapshot_iso, "source": "yfinance", "source_ok": True,
-                    })
+                    if not frame.empty:
+                        frames[sym] = frame
                 except Exception:
-                    rows.append(fallback_row(sym, snapshot_iso))
-            return _apply_volume_proxies(pd.DataFrame(rows))
+                    pass
         except Exception:
             pass
-    snapshot_iso = now_et().isoformat()
-    return _apply_volume_proxies(pd.DataFrame([fallback_row(sym, snapshot_iso) for sym in symbols]))
+
+        # Individual retry is intentionally isolated from the batch. One failed symbol
+        # cannot poison the synchronized universe.
+        for sym in symbols:
+            if sym in frames:
+                continue
+            try:
+                one = yf.download(sym, period="1d", interval="1m", progress=False, prepost=True, threads=False, auto_adjust=False)
+                one = one.dropna(how="all")
+                if not one.empty:
+                    frames[sym] = one
+            except Exception:
+                pass
+
+    for sym in symbols:
+        frame = frames.get(sym)
+        if frame is None or frame.empty:
+            rows.append(fallback_row(sym, received_iso))
+            continue
+        try:
+            close = frame["Close"].dropna()
+            if close.empty:
+                raise ValueError("no close")
+            volume = frame["Volume"] if "Volume" in frame else pd.Series(dtype=float)
+            last = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) > 1 else last
+            first = float(close.iloc[0])
+            pct = ((last / prev) - 1) * 100 if prev else 0.0
+            session_pct = ((last / first) - 1) * 100 if first else 0.0
+            vm = _volume_metrics(volume)
+            try:
+                ts = pd.Timestamp(close.index[-1])
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                provider_ts = ts.tz_convert(TZ).isoformat()
+            except Exception:
+                provider_ts = None
+            rows.append({
+                "symbol": sym, "latest_close": last, "change_pct": pct, "session_pct": session_pct,
+                "volume": vm["session_volume"], **vm,
+                "volume_source": "Actual" if pd.notna(vm["session_volume"]) else "N/A",
+                "volume_proxy_symbol": "",
+                "provider_ts": provider_ts, "received_ts": received_iso, "updated": provider_ts,
+                "source": "yfinance · fallback", "source_ok": True, "feed_mode": "POLL FALLBACK",
+            })
+        except Exception:
+            rows.append(fallback_row(sym, received_iso))
+    return _apply_volume_proxies(pd.DataFrame(rows))
+
+
+def _secret(name: str) -> str:
+    try:
+        value = st.secrets.get(name, "")
+        if value:
+            return str(value).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, "") or "").strip()
+
+
+@st.cache_resource(show_spinner=False)
+def get_live_hub(massive_key: str, databento_key: str) -> LiveMarketHub:
+    return LiveMarketHub(massive_key=massive_key, databento_key=databento_key)
+
+
+def market_state_for_symbol(sym: str, dt: datetime | None = None) -> str:
+    dt = dt or now_et()
+    wd = dt.weekday()
+    minute = dt.hour * 60 + dt.minute
+    if sym in {"BTC-USD", "ETH-USD"}:
+        return "OPEN"
+    if sym in {"EURUSD=X", "JPY=X", "CAD=X"}:
+        if wd == 5 or (wd == 6 and minute < 17 * 60) or (wd == 4 and minute >= 17 * 60):
+            return "CLOSED"
+        return "OPEN"
+    if sym.endswith("=F"):
+        if wd == 5 or (wd == 6 and minute < 18 * 60) or (wd == 4 and minute >= 17 * 60):
+            return "CLOSED"
+        if 17 * 60 <= minute < 18 * 60:
+            return "BREAK"
+        return "OPEN"
+    if sym.startswith("^") or sym in {"DX-Y.NYB"}:
+        if wd >= 5:
+            return "CLOSED"
+        return "OPEN" if 9 * 60 + 30 <= minute < 16 * 60 else "CLOSED"
+    if wd >= 5:
+        return "CLOSED"
+    if 9 * 60 + 30 <= minute < 16 * 60:
+        return "OPEN"
+    if 4 * 60 <= minute < 9 * 60 + 30 or 16 * 60 <= minute < 20 * 60:
+        return "EXTENDED"
+    return "CLOSED"
+
+
+def _seconds_since(value: object) -> int:
+    if value in (None, "", np.nan):
+        return 999999
+    try:
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        return max(0, int((now_et() - dt.astimezone(TZ)).total_seconds()))
+    except Exception:
+        return 999999
+
+
+def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveMarketHub]:
+    baseline = fetch_universe_snapshot(symbols).copy()
+    massive_key = _secret("MASSIVE_API_KEY")
+    databento_key = _secret("DATABENTO_API_KEY")
+    hub = get_live_hub(massive_key, databento_key)
+    hub.ensure_started(list(symbols))
+    live = hub.snapshot()
+
+    if baseline.empty:
+        baseline = pd.DataFrame([fallback_row(sym, now_et().isoformat()) for sym in symbols])
+    baseline = baseline.set_index("symbol", drop=False)
+    for sym, tick in live.items():
+        if sym not in baseline.index:
+            continue
+        for key, value in tick.items():
+            if key == "symbol" or value is None:
+                continue
+            # A live stream should not erase a valid fallback-derived session metric
+            # merely because the stream has not accumulated enough history yet.
+            if isinstance(value, float) and math.isnan(value):
+                continue
+            baseline.at[sym, key] = value
+
+    out = baseline.reset_index(drop=True)
+    out["market_state"] = out["symbol"].apply(market_state_for_symbol)
+    out["market_age_sec"] = out.apply(lambda r: _seconds_since(r.get("provider_ts") or r.get("updated")), axis=1)
+    out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts")), axis=1)
+    out["live_proxy_symbol"] = ""
+    out["live_proxy_price"] = np.nan
+    out["live_proxy_age_sec"] = np.nan
+    out["live_proxy_source"] = ""
+
+    index = {str(r["symbol"]): r for _, r in out.iterrows()}
+    for i, row in out.iterrows():
+        sym = str(row["symbol"])
+        if row["market_state"] in {"CLOSED", "BREAK"}:
+            proxy_sym = LIVE_PROXY_MAP.get(sym)
+            if proxy_sym == "ZN=F" and proxy_sym not in index:
+                proxy_sym = "TLT"
+            proxy = index.get(proxy_sym) if proxy_sym else None
+            if proxy is not None and pd.notna(proxy.get("latest_close", np.nan)):
+                out.at[i, "live_proxy_symbol"] = proxy_sym
+                out.at[i, "live_proxy_price"] = proxy.get("latest_close", np.nan)
+                out.at[i, "live_proxy_age_sec"] = proxy.get("market_age_sec", np.nan)
+                out.at[i, "live_proxy_source"] = proxy.get("source", "")
+    return _apply_volume_proxies(out), hub
 
 
 def score_for(sym: str, pct: float, category: str = "") -> float:
     sym = sym.upper()
+    try:
+        pct = float(pct)
+    except Exception:
+        pct = 0.0
+    if not math.isfinite(pct):
+        pct = 0.0
     mult = 1.0
     if sym in {"DX-Y.NYB", "UUP", "^TNX", "^VIX", "^VVIX", "^VIX9D"} or category in {"Dollar", "Bonds", "Volatility"}:
         mult = -1.0
@@ -463,25 +602,46 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
         inst = LOOKUP.get(sym.upper(), Instrument(sym, sym, "Other", "instrument", tuple()))
         meta.append({"name": inst.name, "category": inst.category, "role": inst.role, "driver": inst.driver})
     out = pd.concat([out, pd.DataFrame(meta)], axis=1)
+    out["change_pct"] = pd.to_numeric(out.get("change_pct"), errors="coerce")
+    out["session_pct"] = pd.to_numeric(out.get("session_pct"), errors="coerce")
     out["score"] = out.apply(lambda r: score_for(r["symbol"], r["change_pct"], r["category"]), axis=1)
     out["state"] = out["score"].apply(state_for)
     out["quality"] = out["score"].apply(quality_for)
-    out["age_sec"] = out["updated"].apply(age_from_iso)
-    out["freshness"] = out["age_sec"].apply(lambda x: health_state(x)[0])
+    if "market_state" not in out:
+        out["market_state"] = out["symbol"].apply(market_state_for_symbol)
+    if "market_age_sec" not in out:
+        out["market_age_sec"] = out.apply(lambda r: _seconds_since(r.get("provider_ts") or r.get("updated")), axis=1)
+    if "fetch_age_sec" not in out:
+        out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts")), axis=1)
+    out["age_sec"] = out["market_age_sec"]
+
+    def row_freshness(r: pd.Series) -> str:
+        if not bool(r.get("source_ok", False)) or pd.isna(r.get("latest_close", np.nan)):
+            return "OFFLINE"
+        mstate = str(r.get("market_state", "UNKNOWN"))
+        if mstate in {"CLOSED", "BREAK"}:
+            proxy_age = r.get("live_proxy_age_sec", np.nan)
+            if pd.notna(proxy_age) and float(proxy_age) <= MAX_DATA_AGE_SECONDS:
+                return "CLOSED · PROXY LIVE"
+            return "CLOSED" if mstate == "CLOSED" else "BREAK"
+        age = int(r.get("market_age_sec", 999999))
+        if age <= 5 and str(r.get("feed_mode", "")).upper() == "STREAM":
+            return "LIVE"
+        if age <= MAX_DATA_AGE_SECONDS:
+            return "CURRENT"
+        return "STALE"
+
+    out["freshness"] = out.apply(row_freshness, axis=1)
     return out
 
 
 def age_from_iso(value: str) -> int:
-    try:
-        dt = datetime.fromisoformat(str(value))
-        return max(0, int((now_et() - dt.astimezone(TZ)).total_seconds()))
-    except Exception:
-        return 999
+    return _seconds_since(value)
 
 
 def health_state(age: int) -> tuple[str, str]:
     age = int(age)
-    if age <= 15:
+    if age <= 5:
         return "LIVE", "green"
     if age <= MAX_DATA_AGE_SECONDS:
         return "CURRENT", "yellow"
@@ -596,13 +756,15 @@ def card_html(title: str, main: str, sub: str = "", tone: str = "blue", chip: st
 
 
 def mini_instrument_html(row: pd.Series, selected: bool = False) -> str:
-    pct = float(row["change_pct"])
+    pct = float(row["change_pct"]) if pd.notna(row.get("change_pct", np.nan)) else 0.0
     tone = "green" if pct > 0 else "red" if pct < 0 else "yellow"
     cls = "mini-inst selected" if selected else "mini-inst"
+    fresh = str(row.get("freshness", "—"))
     return (
         f"<div class='{cls}'><div class='mini-symbol'>{row['symbol']}</div>"
         f"<div class='mini-price'>{short_num(row['latest_close'])}</div>"
-        f"<div class='mini-change {tone}'>{format_change(pct)}</div></div>"
+        f"<div class='mini-change {tone}'>{format_change(pct)}</div>"
+        f"<div class='micro' style='margin-top:3px'>{fresh}</div></div>"
     )
 
 
@@ -820,11 +982,15 @@ def render_editable_table(df: pd.DataFrame, key: str, *, disabled: list[str] | N
 
 
 def strip_summary(row: pd.Series) -> str:
-    pct = float(row.get("change_pct", 0.0))
+    pct = float(row.get("change_pct", 0.0)) if pd.notna(row.get("change_pct", np.nan)) else 0.0
+    freshness = str(row.get("freshness", "—"))
+    market_state = str(row.get("market_state", ""))
+    proxy = str(row.get("live_proxy_symbol", "") or "")
+    status = freshness if not proxy else f"{freshness} · {proxy} proxy"
     return (
         f"{row.get('symbol','—')}  ·  {row.get('name','—')}   |   "
         f"{short_num(row.get('latest_close'))}   {format_change(pct)}   ·   "
-        f"{row.get('state','—')}   ·   {int(row.get('age_sec',999)):02d}s"
+        f"{row.get('state','—')}   ·   {market_state}   ·   {status}"
     )
 
 
@@ -983,28 +1149,45 @@ def render_event_strips(events: pd.DataFrame) -> None:
         )
 
 
-def health_rows(snapshot_age: int) -> list[tuple[str, int, str, str]]:
-    status, tone = health_state(snapshot_age)
-    return [
-        ("Core", snapshot_age, status, tone),
-        ("Selected", snapshot_age, status, tone),
-        ("Sectors", snapshot_age, status, tone),
-        ("Universe", snapshot_age, status, tone),
-        ("Geo / Events", snapshot_age, status, tone),
+def _active_age(rows: pd.DataFrame) -> int | None:
+    if rows is None or rows.empty:
+        return None
+    active = rows[rows["market_state"].isin(["OPEN", "EXTENDED"])] if "market_state" in rows else rows
+    ages = pd.to_numeric(active.get("market_age_sec", pd.Series(dtype=float)), errors="coerce")
+    ages = ages[np.isfinite(ages)]
+    return int(ages.max()) if len(ages) else None
+
+
+def health_rows(df: pd.DataFrame, selected_symbol: str) -> list[tuple[str, int | None, str, str]]:
+    groups: list[tuple[str, pd.DataFrame]] = [
+        ("Core", df[df["symbol"].isin(CORE)]),
+        ("Selected", df[df["symbol"] == selected_symbol]),
+        ("Sectors", df[df["category"].isin(["Sectors", "AI / Tech", "Healthcare / Science", "Defense / Aero", "Real Estate"])]),
+        ("Universe", df),
     ]
+    rows: list[tuple[str, int | None, str, str]] = []
+    for name, subset in groups:
+        age = _active_age(subset)
+        if age is None:
+            rows.append((name, None, "IDLE/CLOSED", "yellow"))
+        else:
+            status, tone = health_state(age)
+            rows.append((name, age, status, tone))
+    return rows
 
 
-def health_card(snapshot_age: int) -> str:
-    pieces = ["<div class='card'><div class='section-title'>Data Health · Max 25s</div><div class='health-grid'>"]
-    for name, age, status, tone in health_rows(snapshot_age):
-        pieces.append(f"<div>{name}</div><div class='{tone}'>{age:02d}s · {status}</div>")
+def health_card(df: pd.DataFrame, selected_symbol: str) -> str:
+    pieces = ["<div class='card'><div class='section-title'>Active Market Data Health · Max 25s</div><div class='health-grid'>"]
+    for name, age, status, tone in health_rows(df, selected_symbol):
+        age_text = "—" if age is None else f"{age:02d}s"
+        pieces.append(f"<div>{name}</div><div class='{tone}'>{age_text} · {status}</div>")
     pieces.append("</div></div>")
     return "".join(pieces)
 
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.6</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.7</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -1013,8 +1196,8 @@ def render_sidebar() -> tuple[str, bool, int]:
         page = st.radio("", pages, index=0, label_visibility="collapsed")
         st.markdown("---")
         auto = st.toggle("Auto refresh", value=True)
-        interval = st.selectbox("Refresh", [10, 15, 20, 25], index=2, format_func=lambda x: f"{x} sec")
-        st.caption("All visible data uses one snapshot · SLA ≤25s")
+        interval = st.selectbox("UI refresh", [1, 2, 5, 10, 15, 20, 25], index=1, format_func=lambda x: f"{x} sec")
+        st.caption("Live provider streams run continuously · UI redraw is independent · active-market SLA ≤25s")
         with st.expander("DISPLAY / TABLES", expanded=False):
             st.selectbox(
                 "Score format",
@@ -1044,13 +1227,17 @@ st.session_state.setdefault("global_change_format", "Percentage")
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v96")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v97")
 
-# One synchronized universe fetch drives every module. No page has its own independent data clock.
-raw_universe = fetch_universe_snapshot(tuple(SYMBOLS))
+# One universe state, continuously overlaid by provider WebSockets. Stream ingestion is
+# independent of Streamlit reruns; every page reads the same thread-safe live hub.
+raw_universe, live_hub = build_market_snapshot(tuple(SYMBOLS))
 universe_df = enrich(raw_universe)
-snapshot_age = int(universe_df["age_sec"].max()) if not universe_df.empty else 999
-snapshot_state, snapshot_tone = health_state(snapshot_age)
+_active = universe_df[universe_df["market_state"].isin(["OPEN", "EXTENDED"])] if not universe_df.empty else universe_df
+snapshot_age = int(_active["market_age_sec"].max()) if len(_active) else 0
+snapshot_state, snapshot_tone = health_state(snapshot_age) if len(_active) else ("IDLE", "yellow")
+provider_status = live_hub.provider_status()
+provider_config = live_hub.configured_summary()
 
 # Header / command bar
 st.markdown("<div class='hero'>", unsafe_allow_html=True)
@@ -1064,7 +1251,22 @@ with h2:
 with h3:
     st.markdown(f"<div class='micro'>Snapshot</div><div class='{snapshot_tone}' style='font-weight:900'>{snapshot_age:02d}s · {snapshot_state}</div>", unsafe_allow_html=True)
 with h4:
-    st.markdown(f"<div class='micro'>Global Clock</div><div class='mid'>{refresh_interval}s / max 25s</div>", unsafe_allow_html=True)
+    pstat_header = pd.DataFrame(provider_status)
+    massive_live = False
+    databento_live = False
+    if not pstat_header.empty:
+        live_mask = pstat_header["connected"].fillna(False) & pstat_header["authenticated"].fillna(False)
+        massive_live = bool(((pstat_header["provider"] == "massive") & live_mask).any())
+        databento_live = bool(((pstat_header["provider"] == "databento") & live_mask).any())
+    live_count = int(massive_live) + int(databento_live)
+    configured_count = int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
+    if live_count:
+        engine_text = f"{live_count}/2 STREAMING · UI {refresh_interval}s"
+    elif configured_count:
+        engine_text = f"CONNECTING · UI {refresh_interval}s"
+    else:
+        engine_text = f"FALLBACK · UI {refresh_interval}s"
+    st.markdown(f"<div class='micro'>Live Engine</div><div class='mid'>{engine_text}</div>", unsafe_allow_html=True)
 with h5:
     if st.button("↻ UPDATE", key="global_update"):
         fetch_universe_snapshot.clear()
@@ -1129,9 +1331,12 @@ if page == "Dashboard":
             with st.popover("Instrument details", use_container_width=True):
                 st.caption(f"Category: {selected['category']}")
                 st.caption(f"Driver: {selected['driver']}")
-                st.caption(f"Source: {selected['source']}")
-                st.caption(f"Snapshot age: {int(selected['age_sec'])} sec")
-                st.caption("Public-feed proxy. Provider latency can differ from dashboard refresh age.")
+                st.caption(f"Source: {selected['source']} · {selected.get('feed_mode','—')}")
+                st.caption(f"Market state: {selected.get('market_state','—')}")
+                st.caption(f"Provider event age: {int(selected.get('market_age_sec',999999))} sec")
+                st.caption(f"Last provider event: {selected.get('provider_ts') or '—'}")
+                if selected.get("live_proxy_symbol"):
+                    st.caption(f"Live closed-market proxy: {selected.get('live_proxy_symbol')} @ {short_num(selected.get('live_proxy_price'))} · age {int(selected.get('live_proxy_age_sec',999999))}s")
 
         with center:
             st.markdown("<div class='shell'><div class='section-title'>Universal Instrument Map · click symbol to focus</div>", unsafe_allow_html=True)
@@ -1147,8 +1352,13 @@ if page == "Dashboard":
             st.markdown("</div>", unsafe_allow_html=True)
 
             c1, c2, c3 = st.columns(3, gap="small")
-            pressure = "Seller-led" if selected["score"] < -30 else "Buyer-led" if selected["score"] > 30 else "Balanced"
-            absorption = "Weak" if selected["score"] < -45 else "Strong" if selected["score"] > 45 else "Mixed"
+            book_imb = float(selected.get("book_imbalance", np.nan)) if pd.notna(selected.get("book_imbalance", np.nan)) else np.nan
+            if pd.notna(book_imb):
+                pressure = "Bid-led" if book_imb > 0.12 else "Ask-led" if book_imb < -0.12 else "Balanced"
+                absorption = "Two-sided" if abs(book_imb) < 0.12 else "Directional"
+            else:
+                pressure = "Seller-led" if selected["score"] < -30 else "Buyer-led" if selected["score"] > 30 else "Balanced"
+                absorption = "Weak" if selected["score"] < -45 else "Strong" if selected["score"] > 45 else "Mixed"
             rv = float(selected.get("relative_volume", np.nan)) if pd.notna(selected.get("relative_volume", np.nan)) else np.nan
             vd = float(selected.get("volume_delta_pct", np.nan)) if pd.notna(selected.get("volume_delta_pct", np.nan)) else np.nan
             volume_activity = "N/A" if pd.isna(rv) else "Elevated" if rv >= 1.35 else "Thin" if rv < 0.70 else "Normal"
@@ -1160,12 +1370,13 @@ if page == "Dashboard":
                     f"<div class='rowline'><span>Pressure</span><b class='{color_for(selected['score'])}'>{pressure}</b></div>"
                     f"<div class='rowline'><span>Rel volume</span><b>{volume_activity}{'' if pd.isna(rv) else f' · {rv:.2f}×'}</b></div>"
                     f"<div class='rowline'><span>Volume Δ</span><b>{volume_delta_text}</b></div>"
+                    f"<div class='rowline'><span>L1 imbalance</span><b>{'N/A' if pd.isna(book_imb) else f'{book_imb:+.2f}'}</b></div>"
                     f"<div class='rowline'><span>Absorption</span><b>{absorption}</b></div></div>",
                     unsafe_allow_html=True,
                 )
                 with st.popover("Open flow", use_container_width=True):
-                    st.write("Flow proxy uses synchronized price, volume, breadth and related-asset agreement from the active snapshot.")
-                    mini_cols = ["symbol", "change_pct", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "score", "state"]
+                    st.write("Where live quote entitlement exists, bid/ask and L1 imbalance come directly from Massive NBBO or Databento MBP-1. Other instruments retain the synchronized proxy layer.")
+                    mini_cols = [c for c in ["symbol", "change_pct", "bid", "ask", "bid_size", "ask_size", "book_imbalance", "spread", "orderflow_source", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "score", "state"] if c in rel_df.columns]
                     st.dataframe(rel_df[mini_cols].head(10), use_container_width=True, hide_index=True, column_config=_table_column_config(mini_cols))
             with c2:
                 st.markdown(
@@ -1193,7 +1404,7 @@ if page == "Dashboard":
                     st.dataframe(drivers, use_container_width=True, hide_index=True, column_config=_table_column_config(list(drivers.columns)))
 
         with right:
-            st.markdown(health_card(snapshot_age), unsafe_allow_html=True)
+            st.markdown(health_card(universe_df, selected_symbol), unsafe_allow_html=True)
             st.markdown("<div style='height:7px'></div>", unsafe_allow_html=True)
             alerts = [
                 (selected["symbol"], selected["state"]),
@@ -1276,7 +1487,7 @@ if page == "Dashboard":
 
     with diag_tab:
         st.markdown("<div class='shell'><div class='section-title'>Selected Instrument · synchronized direct data</div>", unsafe_allow_html=True)
-        diag_cols = ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "age_sec", "source", "role"]
+        diag_cols = [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "market_state", "market_age_sec", "freshness", "source", "feed_mode", "provider_ts", "live_proxy_symbol", "live_proxy_price", "bid", "ask", "book_imbalance", "role"] if c in rel_df.columns]
         render_editable_table(rel_df[diag_cols].copy(), "dashboard_diagnostics_table")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1292,7 +1503,7 @@ elif page == "Instruments":
     if inst_search:
         q = inst_search.upper()
         view = view[view.apply(lambda r: q in f"{r['symbol']} {r['name']} {r['category']} {r['role']} {r['driver']}".upper(), axis=1)]
-    render_strip_cards(view, "instruments", ["symbol", "name", "category", "latest_close", "change_pct", "session_pct", "volume", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "score", "quality", "state", "age_sec", "freshness", "source", "source_ok", "role", "driver", "updated"])
+    render_strip_cards(view, "instruments", [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "session_pct", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "score", "quality", "state", "market_state", "market_age_sec", "fetch_age_sec", "freshness", "source", "feed_mode", "source_ok", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "live_proxy_source", "role", "driver", "provider_ts", "received_ts"] if c in view.columns])
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Flow Tracker":
@@ -1302,7 +1513,9 @@ elif page == "Flow Tracker":
     flow["volume_activity"] = flow["relative_volume"].apply(
         lambda x: "N/A" if pd.isna(x) else "Elevated" if float(x) >= 1.35 else "Thin" if float(x) < 0.70 else "Normal"
     )
-    st.markdown("<div class='shell'><div class='section-title'>Order Flow Proxy Tracker · Interactive Strips</div><div class='small'>Synchronized price / volume / breadth / related-asset proxy. True Level II still requires a broker-grade order-flow feed.</div>", unsafe_allow_html=True)
+    if "book_imbalance" in flow.columns:
+        flow["l1_pressure"] = flow["book_imbalance"].apply(lambda x: "N/A" if pd.isna(x) else "Bid-led" if float(x) > .12 else "Ask-led" if float(x) < -.12 else "Balanced")
+    st.markdown("<div class='shell'><div class='section-title'>Order Flow Proxy Tracker · Interactive Strips</div><div class='small'>Live L1 when entitled: Databento MBP-1 for CME futures and Massive NBBO for equities/ETFs. Proxy logic remains only where direct quote depth is unavailable.</div>", unsafe_allow_html=True)
     scope = st.selectbox("Scope", ["Selected cluster", "All instruments"], label_visibility="collapsed")
     view = flow[flow["symbol"].isin(related)] if scope == "Selected cluster" else flow
     render_strip_cards(view, "flow")
@@ -1371,11 +1584,19 @@ elif page == "Events":
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Data Health":
-    st.markdown("<div class='shell'><div class='section-title'>Data Health · synchronized SLA</div>", unsafe_allow_html=True)
-    st.markdown(health_card(snapshot_age), unsafe_allow_html=True)
-    st.caption("Refresh cadence is capped at 25 seconds for every tier. Dashboard freshness measures the app snapshot age; upstream provider latency is separate.")
-    health_df = universe_df[["symbol", "name", "category", "age_sec", "freshness", "source", "source_ok"]].copy()
-    render_editable_table(health_df, "data_health_table")
+    st.markdown("<div class='shell'><div class='section-title'>Data Health · Provider + Instrument Clocks</div>", unsafe_allow_html=True)
+    st.markdown(health_card(universe_df, selected_symbol), unsafe_allow_html=True)
+    configured_count = int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
+    if configured_count < 2:
+        st.warning("Dedicated live providers are not fully configured. Uncovered instruments use timestamp-correct yfinance fallback and are never labelled LIVE unless their actual provider event age is within the active-market SLA.")
+    pstat = pd.DataFrame(provider_status)
+    if not pstat.empty:
+        pstat["state"] = pstat.apply(lambda r: "LIVE" if r.get("connected") and r.get("authenticated") else "NOT CONFIGURED" if not r.get("configured") else "RECONNECTING", axis=1)
+        st.markdown("<div class='section-title' style='margin-top:8px'>Provider Connections</div>", unsafe_allow_html=True)
+        st.dataframe(pstat[["provider", "channel", "state", "last_message_at", "reconnects", "last_error"]], use_container_width=True, hide_index=True)
+    st.markdown("<div class='section-title' style='margin-top:8px'>Instrument Freshness</div>", unsafe_allow_html=True)
+    health_cols = [c for c in ["symbol", "name", "category", "market_state", "market_age_sec", "fetch_age_sec", "freshness", "source", "feed_mode", "provider_ts", "received_ts", "live_proxy_symbol", "live_proxy_age_sec", "source_ok"] if c in universe_df.columns]
+    render_editable_table(universe_df[health_cols].copy(), "data_health_table")
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Raw Data":
@@ -1394,9 +1615,9 @@ elif page == "Raw Data":
         raw_view = raw_view[raw_view.apply(lambda r: q in f"{r['symbol']} {r['name']} {r['category']} {r['role']}".upper(), axis=1)]
     raw_view = raw_view.rename(columns={
         "symbol": "SOURCE", "category": "DOMAIN", "latest_close": "VALUE", "change_pct": "Δ %",
-        "age_sec": "AGE SEC", "freshness": "STATUS", "source": "FEED",
+        "market_age_sec": "MARKET AGE", "fetch_age_sec": "FETCH AGE", "freshness": "STATUS", "source": "FEED",
     })
-    raw_cols = ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "volume", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "AGE SEC", "STATUS", "FEED", "source_ok"]
+    raw_cols = [c for c in ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "market_state", "MARKET AGE", "FETCH AGE", "STATUS", "FEED", "feed_mode", "provider_ts", "received_ts", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "source_ok"] if c in raw_view.columns]
     render_editable_table(raw_view[raw_cols].copy(), "raw_data_table")
     with st.expander("Selected raw payload", expanded=False):
         r = selected.to_dict()
@@ -1404,6 +1625,6 @@ elif page == "Raw Data":
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown(
-    f"<div class='footerbar'>Macro Regime Engine {APP_VERSION} · one synchronized universe snapshot · global refresh {refresh_interval}s · maximum dashboard tier age {MAX_DATA_AGE_SECONDS}s</div>",
+    f"<div class='footerbar'>Macro Regime Engine {APP_VERSION} · continuous provider hub · UI redraw {refresh_interval}s · active-market stale ceiling {MAX_DATA_AGE_SECONDS}s</div>",
     unsafe_allow_html=True,
 )

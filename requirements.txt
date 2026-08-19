@@ -6,3 +6,5 @@ yfinance>=0.2.40
 requests>=2.31
 python-dateutil>=2.9
 streamlit-autorefresh>=1.0.1
+websocket-client>=1.8
+databento>=0.78

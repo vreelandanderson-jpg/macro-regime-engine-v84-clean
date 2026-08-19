@@ -1,38 +1,138 @@
-# Macro Regime Engine v9.6 — Persistent Edit Sync + Volume Repair
+# Macro Regime Engine v9.7 — Live Provider Hub
 
-This build keeps the synchronized ≤25-second data architecture, universal instrument universe, persistent strip-card presentation, pharma / healthcare, defense / aero, Geo / Global, order-flow proxy, options pressure, raw-data diagnostics, and Events calendar.
+v9.7 replaces the old "refresh means live" model with two separate clocks:
 
-## v9.6 changes
+- **Provider event clock** — timestamp carried by the actual market event/bar/quote.
+- **UI refresh clock** — how often Streamlit redraws the current in-memory state.
 
-- Open strip cards remain open through automatic refresh and manual UPDATE. They close only when the user closes that strip.
-- `EDIT / FORMAT THIS INSTRUMENT` now writes to a persistent UI display-override layer keyed by symbol.
-- An edit made inside a strip immediately reruns the UI and updates that strip's summary, Price / Change / Score / State cards, and full detail grid.
-- Edits survive data refresh until `RESET DISPLAY OVERRIDES` is used.
-- Editable Table view uses the same override layer, so table edits propagate back into Strip Card view.
-- Raw Table remains the untouched synchronized feed for audit/reference.
-- Score formatting can be switched globally between Percentage, Decimal, and Whole.
-- Change formatting can be switched globally between Percentage and Decimal.
-- The same format controls are now available from every instrument editor as well as the sidebar.
+A UI rerun can no longer make an old market value look `00s LIVE`.
 
-## Volume repair
+## Primary live architecture
 
-The previous build relied on the most recent 1-minute `Volume` cell, which may be zero/unreported. v9.6 replaces that behavior with:
+### Databento
+Used for CME-group futures in the universe through `GLBX.MDP3`:
 
-- `volume_1m`: most recent valid non-zero minute volume.
-- `session_volume`: cumulative valid volume across the fetched session.
-- `relative_volume`: latest valid minute volume versus the median of the prior 20 valid minute bars.
-- `volume_delta_pct`: latest valid minute volume versus the previous valid minute bar.
-- `volume_source`: explicitly reports `Actual`, `Proxy · SYMBOL`, `N/A`, or fallback state.
-- `volume_proxy_symbol`: identifies the proxy where a cash/reference series does not publish reliable native traded volume.
-- legacy `volume` now maps to `session_volume` for compatibility.
-- Missing/unavailable volume is displayed as N/A instead of silently becoming 0.
+- continuous front contract subscriptions such as `NQ.c.0`, `ES.c.0`, `YM.c.0`, `RTY.c.0`
+- 1-second OHLCV for continuously updating futures prices
+- MBP-1 for futures top-of-book / L1 order-flow fields
+- automatic background reconnect loop
 
-Cash/reference series use explicit labeled proxies where practical, including Nasdaq cash → NQ futures, S&P cash → ES futures, Dow cash → YM futures, Russell cash → RTY futures, DXY → UUP, and 10Y yield → TLT. Volatility/FX reference series also use clearly labeled liquid proxy volume when native volume is unavailable.
+### Massive
+Used as the broad real-time WebSocket layer:
 
-The Flow Tracker and dashboard Order Flow panel now expose relative-volume activity, volume delta, session volume, and volume source from the synchronized snapshot. This remains a public-feed proxy; true Level II/order-book data requires a broker-grade order-flow provider.
+- U.S. equities / ETFs: per-second aggregates + NBBO quotes
+- U.S. cash indices: direct index value stream where covered
+- Forex: per-second quote-derived aggregates
+- Crypto: per-second aggregates
+- one connection per supported asset class, with all needed symbols multiplexed through that connection
 
+### yfinance
+Retained only as a timestamp-correct fallback/baseline source.
 
-## v9.6 edit safety fix
-- Score/change format buttons now use pre-render callbacks, avoiding StreamlitAPIException from modifying selectbox-owned Session State after instantiation.
-- Score edits continue to persist as display overrides and rerender the expanded strip card immediately.
-- Reset override action is callback-safe as well.
+It is **not** allowed to fabricate missing prices. Failed symbols remain unavailable until a real source provides a value.
+
+## NDX / cash-index behavior
+
+`^NDX` remains the real Nasdaq 100 cash-index value. It is never overwritten with NQ futures.
+
+When cash is closed, the strip keeps the official cash value and separately exposes:
+
+- `market_state = CLOSED`
+- `live_proxy_symbol = NQ=F`
+- `live_proxy_price`
+- `live_proxy_age_sec`
+- `live_proxy_source`
+
+This gives the engine an always-active Nasdaq check without mislabeling futures as the cash index.
+
+The same separation is used for other cash/reference instruments where a valid live proxy exists.
+
+## Freshness rules
+
+For active/extended instruments:
+
+- `LIVE` = direct stream and provider event age <= 5 seconds
+- `CURRENT` = provider event age <= 25 seconds
+- `STALE` = provider event age > 25 seconds
+- `OFFLINE` = no verified price
+
+For closed instruments:
+
+- `CLOSED` = official/reference market is closed
+- `CLOSED · PROXY LIVE` = official market is closed but its configured live proxy is fresh
+
+`fetch_age_sec` and `market_age_sec` are both preserved so the app can distinguish a recent fetch from a recent market event.
+
+## Order flow
+
+Where plan entitlement exists:
+
+- CME futures use Databento `MBP-1`
+- equities / ETFs use Massive NBBO quotes
+
+Fields include:
+
+- `bid`
+- `ask`
+- `bid_size`
+- `ask_size`
+- `mid`
+- `spread`
+- `book_imbalance`
+- `orderflow_source`
+- `orderflow_ts`
+
+Other instruments retain the existing proxy-flow logic rather than pretending L1 data exists.
+
+## Volume
+
+Volume fields are no longer built from a zero-valued latest minute cell.
+
+The engine preserves:
+
+- `volume_1s` when supplied by the stream
+- `stream_volume` accumulated since connection
+- `volume_1m`
+- `session_volume`
+- `relative_volume`
+- `volume_delta_pct`
+- `volume_source`
+- `volume_proxy_symbol`
+
+For stock WebSocket aggregates, provider accumulated session volume is used when supplied. A live stream never silently replaces a fuller baseline session-volume value with an incomplete since-connect total.
+
+## UI behavior retained
+
+- strip cards remain open through automatic and manual refreshes
+- they close only when the user closes them
+- edit/format changes propagate immediately to the matching strip
+- Score display: Percentage / Decimal / Whole
+- Change display: Percentage / Decimal
+- Editable Table and Raw Table remain available
+- display overrides never mutate the underlying live/raw feed
+- Events calendar remains included
+- Pharma / Healthcare & Science and Defense / Aero remain included
+
+## Streamlit Cloud secrets
+
+Set the following in **Streamlit Cloud -> App -> Settings -> Secrets**:
+
+```toml
+MASSIVE_API_KEY = "your_key_here"
+DATABENTO_API_KEY = "your_key_here"
+```
+
+A template is included at `.streamlit/secrets.toml.example`.
+
+Do not commit real API keys to GitHub.
+
+## Important provider-entitlement behavior
+
+The app detects configuration, connection state and last provider message. If a plan does not entitle a specific channel/symbol, that instrument remains on its real fallback source and is not promoted to `LIVE` simply because the UI refreshed.
+
+## Files
+
+- `app.py` — Streamlit application / UI / scoring / fallback baseline
+- `live_feeds.py` — persistent WebSocket + Databento live hub
+- `requirements.txt` — dependencies
+- `.streamlit/secrets.toml.example` — provider-key template
