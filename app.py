@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v9.2"
+APP_VERSION = "v9.3"
 MAX_DATA_AGE_SECONDS = 25
 CACHE_TTL_SECONDS = 20
 DEFAULT_REFRESH_SECONDS = 20
@@ -112,10 +112,27 @@ html, body, [data-testid="stAppViewContainer"]{
 [data-testid="stDataFrame"]{font-size:11px!important;}
 [data-testid="stExpander"]{border:1px solid #173957!important;border-radius:11px!important;background:#06131f!important;}
 [data-testid="stPopover"] button{min-height:32px!important;}
+/* v9.3 interactive strip cards */
+[data-testid="stExpander"]{margin:.32rem 0!important;border:1px solid #173957!important;border-radius:13px!important;background:linear-gradient(90deg,rgba(7,24,39,.98),rgba(5,14,25,.98))!important;overflow:hidden;box-shadow:0 0 12px rgba(0,0,0,.20);}
+[data-testid="stExpander"]:hover{border-color:#2a84b8!important;box-shadow:0 0 14px rgba(49,198,255,.10);}
+[data-testid="stExpander"] summary{padding:.62rem .8rem!important;min-height:42px!important;}
+[data-testid="stExpander"] summary p{font-size:12px!important;font-weight:850!important;letter-spacing:.01em!important;color:#eaf5ff!important;}
+.strip-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 8px;}
+.strip-pill{display:inline-flex;align-items:center;border:1px solid #1d4566;background:#071623;border-radius:999px;padding:3px 8px;font-size:9px;color:#9eb4c9;font-weight:850;white-space:nowrap;}
+.detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:6px 0 4px;}
+.detail-cell{border:1px solid #132f49;background:#06111c;border-radius:9px;padding:7px 8px;min-width:0;}
+.detail-key{font-size:8px;letter-spacing:.09em;color:#7f96ad;text-transform:uppercase;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.detail-val{font-size:11px;color:#eaf5ff;font-weight:800;line-height:1.3;margin-top:2px;overflow-wrap:anywhere;}
+.event-strip{display:grid;grid-template-columns:110px 120px minmax(170px,1.2fr) 90px minmax(180px,1.5fr);gap:8px;align-items:center;border:1px solid #173957;background:linear-gradient(90deg,#081827,#05101b);border-radius:12px;padding:8px 10px;margin:6px 0;}
+.event-strip .ev-date{font-weight:900;color:#dff4ff;font-size:11px}.event-strip .ev-time{font-weight:850;color:#a8bed2;font-size:10px}.event-strip .ev-name{font-weight:900;font-size:11px}.event-strip .ev-region{font-size:9px;color:#8fa3b8;text-transform:uppercase;font-weight:900}.event-strip .ev-impact{font-size:10px;color:#9fb4ca;line-height:1.25;}
+.calendar-note{border:1px solid #143b5a;background:#061521;border-radius:11px;padding:8px 10px;font-size:10px;color:#94abc1;margin-bottom:7px;}
 @media(max-width:1200px){
     .instrument-strip{grid-template-columns:repeat(3,minmax(0,1fr));}
     .decision-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
     .big{font-size:23px}.mid{font-size:14px}
+    .detail-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+    .event-strip{grid-template-columns:90px 90px minmax(150px,1fr);}
+    .event-strip .ev-region,.event-strip .ev-impact{display:none;}
 }
 </style>
 """
@@ -515,6 +532,144 @@ def mini_instrument_html(row: pd.Series, selected: bool = False) -> str:
     )
 
 
+
+def _display_value(key: str, value) -> str:
+    if value is None:
+        return "—"
+    try:
+        if pd.isna(value):
+            return "—"
+    except Exception:
+        pass
+    if isinstance(value, (np.floating, float)):
+        if key in {"change_pct", "session_pct"}:
+            return f"{float(value):+.4f}%"
+        if key == "score":
+            return f"{float(value):+.3f}"
+        if key == "volume":
+            return f"{float(value):,.0f}"
+        return short_num(float(value))
+    if isinstance(value, (np.integer, int)):
+        return f"{int(value):,}"
+    if isinstance(value, (np.bool_, bool)):
+        return "Yes" if bool(value) else "No"
+    return str(value)
+
+
+def strip_summary(row: pd.Series) -> str:
+    pct = float(row.get("change_pct", 0.0))
+    sign = "+" if pct > 0 else ""
+    return (
+        f"{row.get('symbol','—')}  ·  {row.get('name','—')}   |   "
+        f"{short_num(row.get('latest_close'))}   {sign}{pct:.2f}%   ·   "
+        f"{row.get('state','—')}   ·   {int(row.get('age_sec',999)):02d}s"
+    )
+
+
+def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[str] | None = None) -> None:
+    """Primary command-center view: compact strip, click to expose every available field."""
+    if view.empty:
+        st.info("No instruments match this filter.")
+        return
+    mode = st.radio(
+        "View",
+        ["Strip Cards", "Raw Table"],
+        index=0,
+        horizontal=True,
+        key=f"{key_prefix}_view_mode",
+        label_visibility="collapsed",
+    )
+    if mode == "Raw Table":
+        cols = raw_columns or [c for c in view.columns if not str(c).startswith("_")]
+        cols = [c for c in cols if c in view.columns]
+        st.dataframe(view[cols], use_container_width=True, hide_index=True)
+        return
+
+    st.markdown(
+        "<div class='strip-toolbar'>"
+        "<span class='strip-pill'>CLICK ANY STRIP → FULL DATA</span>"
+        "<span class='strip-pill'>NO FIELDS REMOVED</span>"
+        "<span class='strip-pill'>RAW TABLE AVAILABLE</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    for idx, (_, row) in enumerate(view.iterrows()):
+        symbol = str(row.get("symbol", "—"))
+        with st.expander(strip_summary(row), expanded=False):
+            a, b, c, d, e = st.columns([1.1, 1.15, 1.05, 1.05, .8])
+            with a:
+                st.markdown(card_html("Price", short_num(row.get("latest_close")), str(row.get("category", "")), "cyan"), unsafe_allow_html=True)
+            with b:
+                pct = float(row.get("change_pct", 0.0))
+                st.markdown(card_html("Change", f"{pct:+.4f}%", f"session {float(row.get('session_pct',0.0)):+.4f}%", "green" if pct > 0 else "red" if pct < 0 else "yellow"), unsafe_allow_html=True)
+            with c:
+                score = float(row.get("score", 0.0))
+                st.markdown(card_html("Score", f"{score:+.3f}", str(row.get("quality", "—")), color_for(score)), unsafe_allow_html=True)
+            with d:
+                st.markdown(card_html("State", str(row.get("state", "—")), str(row.get("freshness", "—")), color_for(float(row.get("score",0.0)))), unsafe_allow_html=True)
+            with e:
+                if st.button("SELECT", key=f"{key_prefix}_select_{idx}_{symbol}"):
+                    st.session_state.selected_symbol = symbol
+                    st.rerun()
+
+            fields = [(str(k), row[k]) for k in view.columns if not str(k).startswith("_")]
+            cells = ["<div class='detail-grid'>"]
+            for key, value in fields:
+                label = key.replace("_", " ")
+                cells.append(
+                    f"<div class='detail-cell'><div class='detail-key'>{label}</div>"
+                    f"<div class='detail-val'>{_display_value(key, value)}</div></div>"
+                )
+            cells.append("</div>")
+            st.markdown("".join(cells), unsafe_allow_html=True)
+
+
+def _first_friday(year: int, month: int) -> date:
+    d = date(year, month, 1)
+    return d + timedelta(days=(4 - d.weekday()) % 7)
+
+
+def event_watch_for_month(anchor: date) -> pd.DataFrame:
+    """UI calendar layer. Only deterministic recurring watch windows are dated; provider-only events remain explicitly unscheduled."""
+    first_fri = _first_friday(anchor.year, anchor.month)
+    # Weekly Wednesday watch windows are deterministic schedule placeholders, not release verification.
+    d = date(anchor.year, anchor.month, 1)
+    wednesdays = []
+    while d.month == anchor.month:
+        if d.weekday() == 2:
+            wednesdays.append(d)
+        d += timedelta(days=1)
+    rows = [
+        {"date": first_fri, "time": "8:30 AM ET", "event": "NFP / Jobs watch", "region": "US", "level": "HIGH", "impact": "Fed pricing, yields, USD, equities", "status": "schedule watch"},
+        {"date": None, "time": "8:30 AM ET", "event": "CPI / Inflation", "region": "US", "level": "HIGH", "impact": "Dollar, yields, gold, risk assets", "status": "provider date required"},
+        {"date": None, "time": "2:00 PM ET", "event": "FOMC / Fed", "region": "US", "level": "HIGH", "impact": "Rates, dollar, volatility", "status": "provider date required"},
+        {"date": None, "time": "continuous", "event": "Geopolitical / Defense", "region": "GLOBAL", "level": "HIGH", "impact": "Defense, energy, gold, volatility", "status": "continuous"},
+    ]
+    for wd in wednesdays:
+        rows.append({"date": wd, "time": "10:30 AM ET", "event": "Oil Inventories watch", "region": "US", "level": "MED", "impact": "Crude, energy, inflation", "status": "weekly watch"})
+    return pd.DataFrame(rows)
+
+
+def render_event_strips(events: pd.DataFrame) -> None:
+    if events.empty:
+        st.info("No event watches for the selected calendar date.")
+        return
+    for _, ev in events.iterrows():
+        d = ev.get("date")
+        date_text = d.strftime("%a · %b %d") if isinstance(d, date) else "DATE TBA"
+        tone = "red" if str(ev.get("level")) == "HIGH" else "yellow"
+        st.markdown(
+            f"<div class='event-strip'>"
+            f"<div class='ev-date'>{date_text}</div>"
+            f"<div class='ev-time'>{ev.get('time','—')}</div>"
+            f"<div class='ev-name'>{ev.get('event','—')} &nbsp; {chip_html(str(ev.get('level','')), tone)}</div>"
+            f"<div class='ev-region'>{ev.get('region','—')}</div>"
+            f"<div class='ev-impact'>{ev.get('impact','—')}<br><span class='micro'>{ev.get('status','')}</span></div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def health_rows(snapshot_age: int) -> list[tuple[str, int, str, str]]:
     status, tone = health_state(snapshot_age)
     return [
@@ -536,7 +691,7 @@ def health_card(snapshot_age: int) -> str:
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.2</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.3</span></div><div class='small'>SYNCHRONIZED GEO + MARKET COMMAND CENTER</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -557,7 +712,7 @@ if "last_manual_update" not in st.session_state:
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v92")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v93")
 
 # One synchronized universe fetch drives every module. No page has its own independent data clock.
 raw_universe = fetch_universe_snapshot(tuple(SYMBOLS))
@@ -789,28 +944,35 @@ if page == "Dashboard":
 
 
 elif page == "Instruments":
-    st.markdown("<div class='shell'><div class='section-title'>Universal Instruments · one synchronized snapshot</div>", unsafe_allow_html=True)
-    cat = st.selectbox("Filter", ["All"] + sorted(universe_df["category"].unique().tolist()))
+    st.markdown("<div class='shell'><div class='section-title'>Universal Instruments · Interactive Strip Matrix</div><div class='small'>Strip Cards are the primary presentation only. Click any instrument to expose 100% of its current fields; switch to Raw Table at any time.</div>", unsafe_allow_html=True)
+    f1, f2 = st.columns([1.1, 2.3])
+    with f1:
+        cat = st.selectbox("Filter", ["All"] + sorted(universe_df["category"].unique().tolist()))
+    with f2:
+        inst_search = st.text_input("Search instruments", placeholder="symbol, name, category, role, driver…", label_visibility="collapsed")
     view = universe_df if cat == "All" else universe_df[universe_df["category"] == cat]
-    st.dataframe(view[["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "age_sec", "source"]], use_container_width=True, hide_index=True)
+    if inst_search:
+        q = inst_search.upper()
+        view = view[view.apply(lambda r: q in f"{r['symbol']} {r['name']} {r['category']} {r['role']} {r['driver']}".upper(), axis=1)]
+    render_strip_cards(view, "instruments", ["symbol", "name", "category", "latest_close", "change_pct", "session_pct", "volume", "score", "quality", "state", "age_sec", "freshness", "source", "source_ok", "role", "driver", "updated"])
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Flow Tracker":
     flow = universe_df.copy()
     flow["pressure"] = flow["score"].apply(lambda x: "Sellers" if x < -30 else "Buyers" if x > 30 else "Balanced")
     flow["absorption"] = flow["score"].apply(lambda x: "Weak" if x < -50 else "Strong" if x > 50 else "Mixed")
-    st.markdown("<div class='shell'><div class='section-title'>Order Flow Proxy Tracker</div><div class='small'>Synchronized price / volume / breadth / related-asset proxy. True Level II still requires a broker-grade order-flow feed.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='shell'><div class='section-title'>Order Flow Proxy Tracker · Interactive Strips</div><div class='small'>Synchronized price / volume / breadth / related-asset proxy. True Level II still requires a broker-grade order-flow feed.</div>", unsafe_allow_html=True)
     scope = st.selectbox("Scope", ["Selected cluster", "All instruments"], label_visibility="collapsed")
     view = flow[flow["symbol"].isin(related)] if scope == "Selected cluster" else flow
-    st.dataframe(view[["symbol", "name", "latest_close", "change_pct", "score", "pressure", "absorption", "state", "age_sec"]], use_container_width=True, hide_index=True)
+    render_strip_cards(view, "flow")
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Options / Pressure":
     tmp = universe_df.copy()
     tmp["options_pressure"] = tmp["score"].apply(lambda x: "Put pressure" if x < -30 else "Call support" if x > 30 else "Neutral")
     tmp["iv_event_risk"] = tmp["score"].apply(lambda x: "Elevated" if abs(x) > 40 else "Normal")
-    st.markdown("<div class='shell'><div class='section-title'>Options / Instrument Pressure</div><div class='small'>Options remains a mapped pressure layer; dedicated greeks / chain / dealer positioning requires a connected options data provider.</div>", unsafe_allow_html=True)
-    st.dataframe(tmp[["symbol", "name", "category", "change_pct", "score", "options_pressure", "iv_event_risk", "state", "age_sec"]], use_container_width=True, hide_index=True)
+    st.markdown("<div class='shell'><div class='section-title'>Options / Instrument Pressure · Interactive Strips</div><div class='small'>Options remains a mapped pressure layer; dedicated greeks / chain / dealer positioning requires a connected options data provider.</div>", unsafe_allow_html=True)
+    render_strip_cards(tmp, "options")
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page in {"Sectors", "Defense / Aero", "Real Estate", "Healthcare / Science", "Geo / Global"}:
@@ -823,12 +985,10 @@ elif page in {"Sectors", "Defense / Aero", "Real Estate", "Healthcare / Science"
     }
     cats = category_map[page]
     view = universe_df[universe_df["category"].isin(cats)].copy()
-    st.markdown(f"<div class='shell'><div class='section-title'>{page}</div>", unsafe_allow_html=True)
     if page == "Geo / Global":
         view["geo_role"] = view["driver"].replace("", "macro linkage")
-        st.dataframe(view[["symbol", "name", "category", "latest_close", "change_pct", "score", "state", "geo_role", "age_sec"]], use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(view[["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "age_sec"]], use_container_width=True, hide_index=True)
+    st.markdown(f"<div class='shell'><div class='section-title'>{page} · Interactive Strip Matrix</div><div class='small'>Compact surface, full field expansion. No tracked fields are removed.</div>", unsafe_allow_html=True)
+    render_strip_cards(view, f"category_{page.replace(' ','_').replace('/','_')}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Global Sessions":
@@ -838,15 +998,35 @@ elif page == "Global Sessions":
             st.markdown(card_html(name, status, "session state", "green" if status == "Open" else "yellow"), unsafe_allow_html=True)
 
 elif page == "Events":
-    st.markdown("<div class='shell'><div class='section-title'>Event Watch</div><div class='small'>Schedule layer refreshes with the same global clock. Times below are template watch windows, not a live economic-calendar feed.</div>", unsafe_allow_html=True)
-    events = pd.DataFrame([
-        {"event": "CPI / Inflation", "time": "8:30 AM ET", "impact": "Dollar, yields, gold, risk assets"},
-        {"event": "NFP / Jobs", "time": "8:30 AM ET", "impact": "Fed pricing, yields, USD, equities"},
-        {"event": "FOMC / Fed", "time": "2:00 PM ET", "impact": "Rates, dollar, volatility"},
-        {"event": "Oil Inventories", "time": "10:30 AM ET", "impact": "Crude, energy, inflation"},
-        {"event": "Geopolitical / Defense", "time": "continuous", "impact": "Defense, energy, gold, volatility"},
-    ])
-    st.dataframe(events, use_container_width=True, hide_index=True)
+    st.markdown("<div class='shell'><div class='section-title'>Event Watch · Calendar Layer</div><div class='small'>Calendar is integrated into the Events workspace. Scheduled items without a verified calendar provider are explicitly marked instead of inventing dates.</div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1.35, 1.0, 2.2], vertical_alignment="center")
+    with c1:
+        with st.popover("📅 OPEN MINI CALENDAR", use_container_width=True):
+            cal_date = st.date_input("Calendar date", value=now_et().date(), key="event_calendar_date")
+            cal_scope = st.radio("Calendar scope", ["Selected day", "Selected week", "Full month"], horizontal=True, key="event_calendar_scope")
+    with c2:
+        st.markdown(f"<div class='micro'>Selected</div><div class='mid'>{st.session_state.get('event_calendar_date', now_et().date()).strftime('%b %d, %Y')}</div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown("<div class='calendar-note'>Red = high-impact watch · Yellow = medium. DATE TBA means the build needs a verified calendar provider for that release; it is not silently guessed.</div>", unsafe_allow_html=True)
+
+    selected_date = st.session_state.get("event_calendar_date", now_et().date())
+    scope_mode = st.session_state.get("event_calendar_scope", "Selected day")
+    month_events = event_watch_for_month(selected_date)
+    scheduled = month_events[month_events["date"].notna()].copy()
+    unscheduled = month_events[month_events["date"].isna()].copy()
+    if scope_mode == "Selected day":
+        chosen = scheduled[scheduled["date"] == selected_date]
+    elif scope_mode == "Selected week":
+        week_start = selected_date - timedelta(days=selected_date.weekday())
+        week_end = week_start + timedelta(days=6)
+        chosen = scheduled[scheduled["date"].apply(lambda x: isinstance(x, date) and week_start <= x <= week_end)]
+    else:
+        chosen = scheduled
+
+    st.markdown("<div class='section-title' style='margin-top:8px'>Scheduled Watch Windows</div>", unsafe_allow_html=True)
+    render_event_strips(chosen)
+    st.markdown("<div class='section-title' style='margin-top:10px'>Provider-Dated / Continuous Watches</div>", unsafe_allow_html=True)
+    render_event_strips(unscheduled)
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Data Health":

@@ -1,28 +1,22 @@
-# Macro Regime Engine v9.2 — Synchronized Clean Command Center
+# Macro Regime Engine v9.3 — Strip Cards + Calendar
 
-This build replaces the staggered tier clocks and dense vertical-card layout from v9.1.
+This is the clean v9.3 command-center build.
 
-## v9.2 changes
+## v9.3 changes
 
-- **One synchronized universe snapshot** drives every dashboard module.
-- **Every tier is capped at ≤25 seconds**; default auto-refresh is 20 seconds.
-- Manual **UPDATE** clears the global snapshot and refreshes all modules together.
-- Data Health now reports actual snapshot age and `LIVE / CURRENT / STALE` state.
-- Universal instrument tiles are compact and no longer print long role text inside narrow cards.
-- Dashboard is split into interactive **Command / Market Pulse / Regime / Diagnostics** views to remove long-page clutter.
-- Detail information moves into popovers instead of permanently consuming screen space.
-- Raw Data is now a diagnostic console with domain filtering, age, status and feed state.
-- Added a dedicated **Defense / Aero** tracking view and expanded the defense universe.
-- Added **Geo / Global** view while preserving indexes, sectors, commodities, FX, credit, crypto, real estate and healthcare/science tracking.
-- Public-feed latency is distinguished from dashboard refresh age; proxy data is not represented as exchange-direct Level II or options-chain data.
+- Replaces primary instrument column tables with **interactive horizontal strip cards**.
+- **No instrument data is removed**: click any strip to expand every available field from that module.
+- Adds a **Strip Cards / Raw Table** toggle for full audit visibility.
+- Applies strip-card presentation to Instruments, Flow Tracker, Options / Pressure, Sectors, Defense / Aero, Real Estate, Healthcare / Science, and Geo / Global.
+- Raw Data and Data Health remain audit-focused table views.
+- Adds an **Events mini-calendar popover** with selected-day, selected-week, and full-month filtering.
+- Event watch dates are never silently fabricated. Items that require a verified external calendar feed are labeled `DATE TBA / provider date required`.
+- Keeps the single synchronized snapshot architecture and maximum dashboard data age of 25 seconds.
+- Global manual UPDATE still rebuilds the shared snapshot for every module.
 
-## Streamlit Cloud
+## Run
 
-Upload these root files to GitHub:
-
-- `app.py`
-- `requirements.txt`
-- `README.md`
-- `.gitignore`
-
-Main file path: `app.py`
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
