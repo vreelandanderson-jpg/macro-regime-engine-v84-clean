@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v9.9"
+APP_VERSION = "v10.0"
 MAX_DATA_AGE_SECONDS = 25
 CACHE_TTL_SECONDS = 20
 DEFAULT_REFRESH_SECONDS = 2
@@ -496,14 +496,25 @@ def _credential_origin(name: str) -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def get_live_hub(massive_key: str, databento_key: str, providers_enabled: bool = True) -> LiveMarketHub:
-    return LiveMarketHub(massive_key=massive_key, databento_key=databento_key, mt5_enabled=providers_enabled)
+def get_live_hub(
+    massive_key: str, databento_key: str, dxfeed_url: str, dxfeed_user: str,
+    dxfeed_password: str, dxfeed_token: str, dxfeed_symbol_map_json: str,
+    providers_enabled: bool = True,
+) -> LiveMarketHub:
+    return LiveMarketHub(
+        massive_key=massive_key, databento_key=databento_key, mt5_enabled=providers_enabled,
+        dxfeed_rest_url=dxfeed_url, dxfeed_username=dxfeed_user,
+        dxfeed_password=dxfeed_password, dxfeed_token=dxfeed_token,
+        dxfeed_symbol_map_json=dxfeed_symbol_map_json,
+    )
 
 
-def _stop_live_hub_for_keys(massive_key: str, databento_key: str) -> None:
-    """Gracefully stop the currently cached hub before credentials are changed."""
+def _stop_live_hub_for_keys(
+    massive_key: str, databento_key: str, dxfeed_url: str = "", dxfeed_user: str = "",
+    dxfeed_password: str = "", dxfeed_token: str = "", dxfeed_symbol_map_json: str = "",
+) -> None:
     try:
-        hub = get_live_hub(massive_key, databento_key, True)
+        hub = get_live_hub(massive_key, databento_key, dxfeed_url, dxfeed_user, dxfeed_password, dxfeed_token, dxfeed_symbol_map_json, True)
         hub.stop()
     except Exception:
         pass
@@ -519,37 +530,56 @@ def _available_provider_key(name: str) -> str:
     return runtime or _stored_secret(name)
 
 
+def _resolved_provider_setting(name: str) -> str:
+    if not bool(st.session_state.get("live_providers_enabled", True)):
+        return ""
+    runtime = str(st.session_state.get(f"runtime_{name.lower()}", "") or "").strip()
+    return runtime or _stored_secret(name)
+
+
+def _available_provider_setting(name: str) -> str:
+    runtime = str(st.session_state.get(f"runtime_{name.lower()}", "") or "").strip()
+    return runtime or _stored_secret(name)
+
+
 def _provider_connect_callback() -> None:
-    old_m = _available_provider_key("MASSIVE_API_KEY")
-    old_d = _available_provider_key("DATABENTO_API_KEY")
-    _stop_live_hub_for_keys(old_m, old_d)
-    massive_entry = str(st.session_state.get("massive_key_entry", "") or "").strip()
-    databento_entry = str(st.session_state.get("databento_key_entry", "") or "").strip()
-    if massive_entry:
-        st.session_state.runtime_massive_api_key = massive_entry
-    if databento_entry:
-        st.session_state.runtime_databento_api_key = databento_entry
+    old = (
+        _available_provider_key("MASSIVE_API_KEY"), _available_provider_key("DATABENTO_API_KEY"),
+        _available_provider_setting("DXFEED_REST_URL"), _available_provider_setting("DXFEED_USERNAME"),
+        _available_provider_setting("DXFEED_PASSWORD"), _available_provider_setting("DXFEED_TOKEN"),
+        _available_provider_setting("DXFEED_SYMBOL_MAP_JSON"),
+    )
+    _stop_live_hub_for_keys(*old)
+    for widget_key, runtime_name in [
+        ("massive_key_entry", "MASSIVE_API_KEY"), ("databento_key_entry", "DATABENTO_API_KEY"),
+        ("dxfeed_url_entry", "DXFEED_REST_URL"), ("dxfeed_user_entry", "DXFEED_USERNAME"),
+        ("dxfeed_password_entry", "DXFEED_PASSWORD"), ("dxfeed_token_entry", "DXFEED_TOKEN"),
+    ]:
+        value = str(st.session_state.get(widget_key, "") or "").strip()
+        if value:
+            st.session_state[f"runtime_{runtime_name.lower()}"] = value
     st.session_state.live_providers_enabled = True
-    # Clear the visible password fields after the keys have been copied into the
-    # session-only credential store. Callback timing makes this Streamlit-safe.
-    st.session_state.massive_key_entry = ""
-    st.session_state.databento_key_entry = ""
+    for key in ["massive_key_entry", "databento_key_entry", "dxfeed_password_entry", "dxfeed_token_entry"]:
+        st.session_state[key] = ""
 
 
 def _provider_pause_callback() -> None:
-    old_m = _available_provider_key("MASSIVE_API_KEY")
-    old_d = _available_provider_key("DATABENTO_API_KEY")
-    _stop_live_hub_for_keys(old_m, old_d)
+    _stop_live_hub_for_keys(
+        _available_provider_key("MASSIVE_API_KEY"), _available_provider_key("DATABENTO_API_KEY"),
+        _available_provider_setting("DXFEED_REST_URL"), _available_provider_setting("DXFEED_USERNAME"),
+        _available_provider_setting("DXFEED_PASSWORD"), _available_provider_setting("DXFEED_TOKEN"),
+        _available_provider_setting("DXFEED_SYMBOL_MAP_JSON"),
+    )
     st.session_state.live_providers_enabled = False
 
 
 def _provider_enabled_changed() -> None:
-    # The widget callback runs before the script rerenders, so stopping/clearing the
-    # old resource here avoids orphaned provider threads and avoids session-state
-    # mutation after widget instantiation.
-    old_m = _available_provider_key("MASSIVE_API_KEY")
-    old_d = _available_provider_key("DATABENTO_API_KEY")
-    _stop_live_hub_for_keys(old_m, old_d)
+    _stop_live_hub_for_keys(
+        _available_provider_key("MASSIVE_API_KEY"), _available_provider_key("DATABENTO_API_KEY"),
+        _available_provider_setting("DXFEED_REST_URL"), _available_provider_setting("DXFEED_USERNAME"),
+        _available_provider_setting("DXFEED_PASSWORD"), _available_provider_setting("DXFEED_TOKEN"),
+        _available_provider_setting("DXFEED_SYMBOL_MAP_JSON"),
+    )
 
 
 def market_state_for_symbol(sym: str, dt: datetime | None = None) -> str:
@@ -597,7 +627,15 @@ def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveM
     baseline = fetch_universe_snapshot(symbols).copy()
     massive_key = _resolved_provider_key("MASSIVE_API_KEY")
     databento_key = _resolved_provider_key("DATABENTO_API_KEY")
-    hub = get_live_hub(massive_key, databento_key, bool(st.session_state.get("live_providers_enabled", True)))
+    dxfeed_url = _resolved_provider_setting("DXFEED_REST_URL")
+    dxfeed_user = _resolved_provider_setting("DXFEED_USERNAME")
+    dxfeed_password = _resolved_provider_setting("DXFEED_PASSWORD")
+    dxfeed_token = _resolved_provider_setting("DXFEED_TOKEN")
+    dxfeed_symbol_map_json = _resolved_provider_setting("DXFEED_SYMBOL_MAP_JSON")
+    hub = get_live_hub(
+        massive_key, databento_key, dxfeed_url, dxfeed_user, dxfeed_password, dxfeed_token,
+        dxfeed_symbol_map_json, bool(st.session_state.get("live_providers_enabled", True)),
+    )
     hub.ensure_started(list(symbols))
     live = hub.snapshot()
 
@@ -631,78 +669,86 @@ def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveM
         out["active_provider_symbol"] = out["symbol"].astype(str)
     else:
         out["active_provider_symbol"] = out["active_provider_symbol"].fillna(out["symbol"]).astype(str)
-    out["market_state"] = out["symbol"].apply(market_state_for_symbol)
+    # Session schedule is context only. It never creates LIVE/EXTENDED.
+    out["session_reference_state"] = out["symbol"].apply(market_state_for_symbol)
     out["market_age_sec"] = out.apply(lambda r: _seconds_since(r.get("provider_ts") or r.get("updated")), axis=1)
     out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts")), axis=1)
-    out["live_proxy_symbol"] = ""
-    out["live_proxy_price"] = np.nan
-    out["live_proxy_age_sec"] = np.nan
-    out["live_proxy_source"] = ""
+    if "route_accuracy" not in out.columns:
+        out["route_accuracy"] = "REFERENCE"
+    else:
+        out["route_accuracy"] = out["route_accuracy"].fillna("REFERENCE")
+    if "route_session" not in out.columns:
+        out["route_session"] = ""
+    else:
+        out["route_session"] = out["route_session"].fillna("")
+    out["extended_route_symbol"] = ""
+    out["extended_route_price"] = np.nan
+    out["extended_route_age_sec"] = np.nan
+    out["extended_route_source"] = ""
 
     index = {str(r["symbol"]): r for _, r in out.iterrows()}
     for i, row in out.iterrows():
         sym = str(row["symbol"])
-        if row["market_state"] in {"CLOSED", "BREAK"}:
-            proxy_sym = LIVE_PROXY_MAP.get(sym)
-            if proxy_sym == "ZN=F" and proxy_sym not in index:
-                proxy_sym = "TLT"
-            proxy = index.get(proxy_sym) if proxy_sym else None
-            if proxy is not None and pd.notna(proxy.get("latest_close", np.nan)):
-                out.at[i, "live_proxy_symbol"] = proxy_sym
-                out.at[i, "live_proxy_price"] = proxy.get("latest_close", np.nan)
-                out.at[i, "live_proxy_age_sec"] = proxy.get("market_age_sec", np.nan)
-                out.at[i, "live_proxy_source"] = proxy.get("source", "")
+        own_age = int(row.get("market_age_sec", 999999)) if pd.notna(row.get("market_age_sec", np.nan)) else 999999
+        own_stream = str(row.get("feed_mode", "")).upper() == "STREAM"
+        own_fresh = own_stream and own_age <= MAX_DATA_AGE_SECONDS and pd.notna(row.get("latest_close", np.nan))
+        if own_fresh:
+            continue
+        route_sym = LIVE_PROXY_MAP.get(sym, "")
+        route = index.get(route_sym) if route_sym else None
+        if route is None:
+            continue
+        route_age = int(route.get("market_age_sec", 999999)) if pd.notna(route.get("market_age_sec", np.nan)) else 999999
+        route_stream = str(route.get("feed_mode", "")).upper() == "STREAM"
+        route_price = route.get("latest_close", np.nan)
+        if not route_stream or route_age > MAX_DATA_AGE_SECONDS or pd.isna(route_price):
+            continue
+        out.at[i, "extended_route_symbol"] = route_sym
+        out.at[i, "extended_route_price"] = route_price
+        out.at[i, "extended_route_age_sec"] = route_age
+        out.at[i, "extended_route_source"] = str(route.get("source", "") or "")
+        out.at[i, "latest_close"] = route_price
+        out.at[i, "provider_ts"] = route.get("provider_ts")
+        out.at[i, "received_ts"] = route.get("received_ts")
+        out.at[i, "source"] = str(route.get("source", "") or "")
+        out.at[i, "source_ok"] = bool(route.get("source_ok", True))
+        out.at[i, "feed_mode"] = "STREAM"
+        out.at[i, "price_type"] = f"EXTENDED REAL LEVEL · {route_sym}"
+        out.at[i, "active_provider_symbol"] = route_sym
+        out.at[i, "route_accuracy"] = "ECONOMIC EQUIVALENT"
+        out.at[i, "route_session"] = "EXTENDED"
+        for fld in ["bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume_1s", "volume_1m", "session_volume", "volume"]:
+            if fld in out.columns and fld in route.index and pd.notna(route.get(fld, np.nan)):
+                out.at[i, fld] = route.get(fld)
 
-    # ALWAYS-ON CHECK CLOCK: keep the official instrument price separate from the
-    # instrument used to monitor current market conditions. A closed cash index can
-    # therefore remain under live surveillance through a valid futures/ETF proxy
-    # without ever overwriting its official close.
-    out["monitor_symbol"] = out["symbol"].astype(str)
+    out["market_age_sec"] = out.apply(lambda r: _seconds_since(r.get("provider_ts") or r.get("updated")), axis=1)
+    out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts")), axis=1)
+    states = []
+    for _, row in out.iterrows():
+        age = int(row.get("market_age_sec", 999999)) if pd.notna(row.get("market_age_sec", np.nan)) else 999999
+        stream = str(row.get("feed_mode", "")).upper() == "STREAM"
+        source_ok = bool(row.get("source_ok", False))
+        price_ok = pd.notna(row.get("latest_close", np.nan))
+        if stream and source_ok and price_ok and age <= MAX_DATA_AGE_SECONDS:
+            explicit = str(row.get("route_session", "") or "").upper()
+            session_ref = str(row.get("session_reference_state", "") or "").upper()
+            routed = str(row.get("route_accuracy", "") or "").upper() == "ECONOMIC EQUIVALENT"
+            states.append("EXTENDED" if explicit == "EXTENDED" or routed or session_ref in {"CLOSED", "BREAK"} else "LIVE")
+        elif not source_ok or not price_ok:
+            states.append("UNAVAILABLE")
+        else:
+            states.append("STALE")
+    out["market_state"] = states
+    out["monitor_symbol"] = out["active_provider_symbol"].fillna(out["symbol"]).astype(str)
     out["monitor_price"] = pd.to_numeric(out["latest_close"], errors="coerce")
     out["monitor_age_sec"] = pd.to_numeric(out["market_age_sec"], errors="coerce")
     out["monitor_source"] = out["source"].astype(str)
-    out["monitor_mode"] = "DIRECT"
-    out["monitor_status"] = "CHECKING"
-    for i, row in out.iterrows():
-        mstate = str(row.get("market_state", "UNKNOWN"))
-        source_ok = bool(row.get("source_ok", False))
-        market_age = int(row.get("market_age_sec", 999999)) if pd.notna(row.get("market_age_sec", np.nan)) else 999999
-        fetch_age = int(row.get("fetch_age_sec", 999999)) if pd.notna(row.get("fetch_age_sec", np.nan)) else 999999
-        proxy_sym = str(row.get("live_proxy_symbol", "") or "")
-        proxy_age = row.get("live_proxy_age_sec", np.nan)
-        proxy_price = row.get("live_proxy_price", np.nan)
-
-        direct_stream = str(row.get("feed_mode", "")).upper() == "STREAM" and market_age <= MAX_DATA_AGE_SECONDS and pd.notna(row.get("latest_close", np.nan))
-        if direct_stream:
-            # A real broker/exchange quote remains DIRECT even if the canonical cash
-            # reference is outside its official calculation hours. Example: ^NDX can
-            # display a real broker NAS100/USTEC level while its official NDX reference
-            # remains preserved in reference_price.
-            price_type = str(row.get("price_type", "DIRECT LIVE") or "DIRECT LIVE")
-            out.at[i, "monitor_mode"] = price_type
-            out.at[i, "monitor_status"] = "LIVE" if market_age <= 5 else "CURRENT"
-        elif mstate in {"OPEN", "EXTENDED"}:
-            out.at[i, "monitor_mode"] = "DIRECT"
-            out.at[i, "monitor_status"] = "CURRENT" if market_age <= MAX_DATA_AGE_SECONDS else "STALE"
-        elif proxy_sym and pd.notna(proxy_age) and float(proxy_age) <= MAX_DATA_AGE_SECONDS and pd.notna(proxy_price):
-            out.at[i, "monitor_symbol"] = proxy_sym
-            out.at[i, "monitor_price"] = proxy_price
-            out.at[i, "monitor_age_sec"] = float(proxy_age)
-            out.at[i, "monitor_source"] = str(row.get("live_proxy_source", "") or "")
-            out.at[i, "monitor_mode"] = "LIVE PROXY"
-            out.at[i, "monitor_status"] = "PROXY LIVE" if float(proxy_age) <= 5 else "PROXY CURRENT"
-        else:
-            # Closed markets do not produce a legitimate new trade/index value. The
-            # engine still verifies the source on every baseline cycle and exposes
-            # that check clock separately from the frozen official market timestamp.
-            out.at[i, "monitor_age_sec"] = fetch_age
-            out.at[i, "monitor_mode"] = "REFERENCE CHECK" if mstate in {"CLOSED", "BREAK"} else "DIRECT"
-            if not source_ok or pd.isna(row.get("latest_close", np.nan)):
-                out.at[i, "monitor_status"] = "OFFLINE"
-            elif fetch_age <= MAX_DATA_AGE_SECONDS and mstate in {"CLOSED", "BREAK"}:
-                out.at[i, "monitor_status"] = "REFERENCE · CHECKED"
-            else:
-                out.at[i, "monitor_status"] = "STALE"
+    out["monitor_mode"] = out["price_type"].fillna("REFERENCE").astype(str)
+    out["monitor_status"] = out["market_state"].astype(str)
+    out["live_proxy_symbol"] = out["extended_route_symbol"]
+    out["live_proxy_price"] = out["extended_route_price"]
+    out["live_proxy_age_sec"] = out["extended_route_age_sec"]
+    out["live_proxy_source"] = out["extended_route_source"]
     return _apply_volume_proxies(out), hub
 
 
@@ -1312,7 +1358,7 @@ def render_event_strips(events: pd.DataFrame) -> None:
 def _active_age(rows: pd.DataFrame) -> int | None:
     if rows is None or rows.empty:
         return None
-    active = rows[rows["market_state"].isin(["OPEN", "EXTENDED"])] if "market_state" in rows else rows
+    active = rows[rows["market_state"].isin(["LIVE", "EXTENDED"])] if "market_state" in rows else rows
     ages = pd.to_numeric(active.get("market_age_sec", pd.Series(dtype=float)), errors="coerce")
     ages = ages[np.isfinite(ages)]
     return int(ages.max()) if len(ages) else None
@@ -1411,7 +1457,7 @@ def health_card(df: pd.DataFrame, selected_symbol: str) -> str:
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v9.9</span></div><div class='small'>UNIVERSAL LIVE SOURCE ROUTER · GEO + MARKET</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v10.0</span></div><div class='small'>QUOTE-DETECTED EXTENDED MARKET ROUTER · GEO + MARKET</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -1427,10 +1473,15 @@ def render_sidebar() -> tuple[str, bool, int]:
             enabled = st.toggle("Live providers enabled", key="live_providers_enabled", on_change=_provider_enabled_changed)
             massive_origin = _credential_origin("MASSIVE_API_KEY")
             databento_origin = _credential_origin("DATABENTO_API_KEY")
+            dxfeed_origin = "CONFIGURED" if (_stored_secret("DXFEED_REST_URL") or st.session_state.get("runtime_dxfeed_rest_url")) else "NOT CONFIGURED"
             mt5_origin = "AUTO-DETECT"
-            st.caption(f"MT5 broker: {mt5_origin} · Massive: {massive_origin} · Databento: {databento_origin}")
-            st.caption("MT5 needs no API key when this app runs on the same Windows machine as the terminal. Massive can cover stocks/ETFs/indices/FX/crypto/futures; Databento remains the higher-priority CME futures path when entitled.")
-            st.caption("Keys entered here are kept only in this Streamlit session. Deployment Secrets remain the persistent method and are never displayed back in the app.")
+            st.caption(f"dxFeed: {dxfeed_origin} · MT5: {mt5_origin} · Massive: {massive_origin} · Databento: {databento_origin}")
+            st.caption("Every LIVE/EXTENDED state requires an actual fresh provider quote/trade timestamp. dxFeed is the preferred U.S. overnight stock/ETF layer when entitled.")
+            st.caption("Credentials entered here stay in this Streamlit session. Deployment Secrets remain persistent.")
+            st.text_input("dxFeed REST events URL", key="dxfeed_url_entry", placeholder="Production .../webservice/rest/events.json")
+            st.text_input("dxFeed username (optional)", key="dxfeed_user_entry", placeholder="Basic-auth username")
+            st.text_input("dxFeed password (optional)", type="password", key="dxfeed_password_entry", placeholder="Basic-auth password")
+            st.text_input("dxFeed bearer token (optional)", type="password", key="dxfeed_token_entry", placeholder="Bearer token")
             massive_entry = st.text_input("Massive API key", type="password", key="massive_key_entry", placeholder="Paste key or leave blank to use existing secret")
             databento_entry = st.text_input("Databento API key", type="password", key="databento_key_entry", placeholder="Paste key or leave blank to use existing secret")
             c1, c2 = st.columns(2)
@@ -1470,16 +1521,21 @@ st.session_state.setdefault("global_change_format", "Percentage")
 st.session_state.setdefault("live_providers_enabled", True)
 st.session_state.setdefault("runtime_massive_api_key", "")
 st.session_state.setdefault("runtime_databento_api_key", "")
+st.session_state.setdefault("runtime_dxfeed_rest_url", "")
+st.session_state.setdefault("runtime_dxfeed_username", "")
+st.session_state.setdefault("runtime_dxfeed_password", "")
+st.session_state.setdefault("runtime_dxfeed_token", "")
+st.session_state.setdefault("runtime_dxfeed_symbol_map_json", "")
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v99")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v100")
 
 # One universe state, continuously overlaid by provider WebSockets. Stream ingestion is
 # independent of Streamlit reruns; every page reads the same thread-safe live hub.
 raw_universe, live_hub = build_market_snapshot(tuple(SYMBOLS))
 universe_df = enrich(raw_universe)
-_active = universe_df[(universe_df["market_state"].isin(["OPEN", "EXTENDED"])) | ((universe_df["feed_mode"].astype(str).str.upper() == "STREAM") & (pd.to_numeric(universe_df["market_age_sec"], errors="coerce") <= MAX_DATA_AGE_SECONDS))] if not universe_df.empty else universe_df
+_active = universe_df[universe_df["market_state"].isin(["LIVE", "EXTENDED"])] if not universe_df.empty else universe_df
 snapshot_age = int(_active["market_age_sec"].max()) if len(_active) else 0
 snapshot_state, snapshot_tone = health_state(snapshot_age) if len(_active) else ("IDLE", "yellow")
 _check_age = pd.to_numeric(universe_df.get("monitor_age_sec", pd.Series(dtype=float)), errors="coerce")

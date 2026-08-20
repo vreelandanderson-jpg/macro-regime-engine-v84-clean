@@ -1,4 +1,4 @@
-# Macro Regime Engine v9.9 — Universal Live Source Router
+# Macro Regime Engine v10.0 — Quote-Detected Extended Market Router
 
 This build replaces the closed/reference-first behavior with a universal real-level router across the entire tracked instrument universe.
 

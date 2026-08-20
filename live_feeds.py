@@ -30,6 +30,25 @@ except Exception:  # pragma: no cover
 
 UTC = timezone.utc
 
+# dxFeed production REST endpoint is supplied during provider onboarding. The engine
+# deliberately does not default to the public demo endpoint because demo data is delayed
+# and must never be promoted to LIVE/EXTENDED.
+DXFEED_REST_URL = str(os.getenv("DXFEED_REST_URL", "") or "").strip()
+DXFEED_USERNAME = str(os.getenv("DXFEED_USERNAME", "") or "").strip()
+DXFEED_PASSWORD = str(os.getenv("DXFEED_PASSWORD", "") or "").strip()
+DXFEED_TOKEN = str(os.getenv("DXFEED_TOKEN", "") or "").strip()
+DXFEED_POLL_SECONDS = max(1.0, float(os.getenv("DXFEED_POLL_SECONDS", "1.25") or 1.25))
+
+# Canonical app symbol -> dxFeed symbol. U.S. stocks and ETFs use the canonical ticker
+# automatically; these overrides cover non-equity naming differences. Production clients
+# can replace/add mappings with DXFEED_SYMBOL_MAP_JSON from their dxFeed IPF catalog.
+DXFEED_SYMBOL_OVERRIDES = {
+    "^GSPC": "SPX", "^NDX": "NDX", "^DJI": "DJI", "^RUT": "RUT",
+    "^VIX": "VIX", "^VVIX": "VVIX", "^VIX9D": "VIX9D", "^TNX": "TNX",
+    "DX-Y.NYB": "DXY", "EURUSD=X": "EUR/USD", "JPY=X": "USD/JPY",
+    "CAD=X": "USD/CAD", "BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD",
+}
+
 # Canonical app symbol -> provider symbol
 DATABENTO_FUTURES = {
     "NQ=F": "NQ.v.0",
@@ -106,18 +125,14 @@ MT5_ALIASES = {
     "ETH-USD": ("ETHUSD", "ETHUSD.", "ETHUSDm"),
 }
 
-# Non-traded/cash references that can remain actively monitored by a tradable proxy
-# when the reference itself is closed. The proxy never overwrites the official price.
+# Mandatory extended-route candidates for reference instruments. These are REAL quoted
+# instruments, not synthetic prices. The app may promote a fresh route to the visible
+# active level while preserving the original official/reference level separately.
 LIVE_PROXY_MAP = {
     "^NDX": "NQ=F",
     "^GSPC": "ES=F",
     "^DJI": "YM=F",
     "^RUT": "RTY=F",
-    "^TNX": "ZN=F",  # if absent in the universe, app can fall back to TLT
-    "DX-Y.NYB": "UUP",
-    "^VIX": "NQ=F",
-    "^VVIX": "^VIX",
-    "^VIX9D": "^VIX",
 }
 
 
@@ -186,9 +201,24 @@ class LiveMarketHub:
     copy via ``snapshot``. No UI session state is mutated from background threads.
     """
 
-    def __init__(self, massive_key: str | None = None, databento_key: str | None = None, mt5_enabled: bool | None = None):
+    def __init__(
+        self,
+        massive_key: str | None = None,
+        databento_key: str | None = None,
+        mt5_enabled: bool | None = None,
+        dxfeed_rest_url: str | None = None,
+        dxfeed_username: str | None = None,
+        dxfeed_password: str | None = None,
+        dxfeed_token: str | None = None,
+        dxfeed_symbol_map_json: str | None = None,
+    ):
         self.massive_key = (massive_key or os.getenv("MASSIVE_API_KEY") or os.getenv("POLYGON_API_KEY") or "").strip()
         self.databento_key = (databento_key or os.getenv("DATABENTO_API_KEY") or "").strip()
+        self.dxfeed_rest_url = (dxfeed_rest_url or DXFEED_REST_URL or "").strip()
+        self.dxfeed_username = (dxfeed_username or DXFEED_USERNAME or "").strip()
+        self.dxfeed_password = (dxfeed_password or DXFEED_PASSWORD or "").strip()
+        self.dxfeed_token = (dxfeed_token or DXFEED_TOKEN or "").strip()
+        self.dxfeed_symbol_map_json = (dxfeed_symbol_map_json or os.getenv("DXFEED_SYMBOL_MAP_JSON") or "").strip()
         env_mt5_enabled = str(os.getenv("MT5_LIVE_ENABLE", "1")).strip().lower() not in {"0", "false", "off", "no"}
         self.mt5_enabled = env_mt5_enabled if mt5_enabled is None else bool(mt5_enabled and env_mt5_enabled)
         self.mt5_terminal_path = str(os.getenv("MT5_TERMINAL_PATH", "") or "").strip()
@@ -200,6 +230,8 @@ class LiveMarketHub:
         self.options_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self.mt5_symbol_map: dict[str, str] = {}
         self.db_instrument_map: dict[int, str] = {}
+        self.dxfeed_app_to_provider: dict[str, str] = {}
+        self.dxfeed_provider_to_app: dict[str, list[str]] = {}
         self.started = False
         self.stop_event = threading.Event()
         self.threads: list[threading.Thread] = []
@@ -210,6 +242,17 @@ class LiveMarketHub:
             if self.started:
                 return
             self.started = True
+
+        # dxFeed universal quote detector. With an overnight U.S. equities entitlement
+        # this supplies actual overnight stock/ETF quotes. Other asset classes are used
+        # when present in the account IPF. A quote is accepted only when its provider
+        # timestamp is fresh; schedule labels never create a LIVE state.
+        dx_configured = bool(self.dxfeed_rest_url)
+        self._start_status("dxfeed", "universal", dx_configured)
+        if dx_configured:
+            self._build_dxfeed_symbol_map(list(all_symbols))
+            if self.dxfeed_app_to_provider:
+                self._spawn(self._run_dxfeed_rest, "dxfeed-universal", list(all_symbols))
 
         # Local MT5/broker feed. This is the only source allowed to keep a cash-like
         # dashboard instrument moving with a genuine broker quote outside the official
@@ -311,6 +354,8 @@ class LiveMarketHub:
         priority: int = 10,
         price_type: str = "DIRECT LIVE",
         source_id: str = "",
+        route_session: str = "",
+        route_accuracy: str = "EXACT",
     ) -> None:
         if price is None or not math.isfinite(price):
             return
@@ -363,6 +408,8 @@ class LiveMarketHub:
                 "feed_mode": "STREAM",
                 "feed_channel": feed_channel,
                 "raw_symbol": raw_symbol,
+                "route_session": route_session or previous.get("route_session", ""),
+                "route_accuracy": route_accuracy or previous.get("route_accuracy", "EXACT"),
                 "change_pct": change_1m if change_1m is not None else previous.get("change_pct"),
                 "session_pct": session_pct if session_pct is not None else previous.get("session_pct"),
                 "volume_1m": previous.get("volume_1m"),
@@ -407,6 +454,143 @@ class LiveMarketHub:
             previous["orderflow_ts"] = ts or _now_iso()
             previous["orderflow_source"] = source
             self.rows[symbol] = previous
+
+    def _build_dxfeed_symbol_map(self, all_symbols: list[str]) -> None:
+        overrides = dict(DXFEED_SYMBOL_OVERRIDES)
+        if self.dxfeed_symbol_map_json:
+            try:
+                custom = json.loads(self.dxfeed_symbol_map_json)
+                if isinstance(custom, dict):
+                    overrides.update({str(k): str(v) for k, v in custom.items() if str(k) and str(v)})
+            except Exception as exc:
+                self._update_status("dxfeed", "universal", last_error=f"symbol map JSON: {exc}"[:300])
+        app_to_provider: dict[str, str] = {}
+        provider_to_app: dict[str, list[str]] = defaultdict(list)
+        for app_symbol in all_symbols:
+            provider_symbol = overrides.get(app_symbol)
+            if not provider_symbol and self._is_massive_stock_symbol(app_symbol):
+                provider_symbol = app_symbol
+            if not provider_symbol:
+                continue
+            app_to_provider[app_symbol] = provider_symbol
+            provider_to_app[provider_symbol].append(app_symbol)
+        with self.lock:
+            self.dxfeed_app_to_provider = app_to_provider
+            self.dxfeed_provider_to_app = dict(provider_to_app)
+
+    def _dxfeed_auth(self):
+        headers = {"Accept": "application/json"}
+        auth = None
+        if self.dxfeed_token:
+            headers["Authorization"] = f"Bearer {self.dxfeed_token}"
+        elif self.dxfeed_username:
+            auth = (self.dxfeed_username, self.dxfeed_password)
+        return headers, auth
+
+    @staticmethod
+    def _dxfeed_event_ts_ms(event: dict[str, Any]) -> float | None:
+        values = []
+        for value in (event.get("time"), event.get("bidTime"), event.get("askTime"), event.get("eventTime")):
+            try:
+                x = float(value)
+                if x > 1_000_000_000_000:
+                    values.append(x)
+            except Exception:
+                pass
+        return max(values) if values else None
+
+    def _handle_dxfeed_payload(self, payload: dict[str, Any]) -> int:
+        if not isinstance(payload, dict) or str(payload.get("status", "OK")).upper() not in {"OK", "SUCCESS"}:
+            return 0
+        quotes = payload.get("Quote", {}) if isinstance(payload.get("Quote", {}), dict) else {}
+        trades = payload.get("Trade", {}) if isinstance(payload.get("Trade", {}), dict) else {}
+        summaries = payload.get("Summary", {}) if isinstance(payload.get("Summary", {}), dict) else {}
+        touched = 0
+        for provider_symbol in (set(quotes) | set(trades) | set(summaries)):
+            apps = self.dxfeed_provider_to_app.get(str(provider_symbol), [])
+            if not apps:
+                continue
+            q = quotes.get(provider_symbol, {}) if isinstance(quotes.get(provider_symbol, {}), dict) else {}
+            t = trades.get(provider_symbol, {}) if isinstance(trades.get(provider_symbol, {}), dict) else {}
+            sm = summaries.get(provider_symbol, {}) if isinstance(summaries.get(provider_symbol, {}), dict) else {}
+            bid = _clean_price(q.get("bidPrice")); ask = _clean_price(q.get("askPrice")); last = _clean_price(t.get("price"))
+            price = None
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                price = (bid + ask) / 2.0
+            elif last is not None and last > 0:
+                price = last
+            elif bid is not None and bid > 0:
+                price = bid
+            elif ask is not None and ask > 0:
+                price = ask
+            if price is None:
+                continue
+            ts_candidates = [self._dxfeed_event_ts_ms(q), self._dxfeed_event_ts_ms(t), self._dxfeed_event_ts_ms(sm)]
+            ts_ms = max([x for x in ts_candidates if x is not None], default=None)
+            provider_ts = _iso_from_ms(ts_ms) if ts_ms else None
+            if not provider_ts:
+                continue
+            try:
+                age = max(0.0, time.time() - datetime.fromisoformat(provider_ts).timestamp())
+            except Exception:
+                continue
+            # A lasting event can be returned by a fresh HTTP request after its market has
+            # stopped. Only the provider event timestamp can make it LIVE/EXTENDED.
+            if age > 25.0:
+                continue
+            extended_flag = bool(t.get("extendedTradingHours", False))
+            route_session = "EXTENDED" if extended_flag else "LIVE"
+            day_volume = _clean_price(t.get("dayVolume"))
+            for app_symbol in apps:
+                self._record_tick(
+                    app_symbol, price, provider_ts, f"dxFeed · {provider_symbol}",
+                    session_volume=day_volume, feed_channel="REST Quote/Trade", raw_symbol=str(provider_symbol),
+                    priority=4, price_type="DXFEED LIVE QUOTE", source_id=f"dxfeed:{provider_symbol}",
+                    route_session=route_session, route_accuracy="EXACT",
+                )
+                self._record_orderflow(
+                    app_symbol, bid=bid, ask=ask, bid_size=_clean_price(q.get("bidSize")),
+                    ask_size=_clean_price(q.get("askSize")), ts=provider_ts,
+                    source=f"dxFeed · {provider_symbol}",
+                )
+                touched += 1
+        return touched
+
+    def _run_dxfeed_rest(self, all_symbols: list[str]) -> None:
+        url = self.dxfeed_rest_url.strip()
+        if not url:
+            return
+        if not url.endswith(".json") and not url.endswith("/events"):
+            url = url.rstrip("/") + "/events.json"
+        provider_symbols = list(dict.fromkeys(self.dxfeed_app_to_provider.values()))
+        headers, auth = self._dxfeed_auth()
+        wait_seconds = DXFEED_POLL_SECONDS
+        while not self.stop_event.is_set():
+            started = time.time()
+            try:
+                response = requests.post(
+                    url,
+                    data={"events": "Quote,Trade,Summary", "symbols": ",".join(provider_symbols), "timeout": 1},
+                    headers=headers, auth=auth, timeout=4,
+                )
+                response.raise_for_status()
+                payload = response.json() if response.content else {}
+                touched = self._handle_dxfeed_payload(payload)
+                self._update_status(
+                    "dxfeed", "universal", connected=True, authenticated=True, subscribed=bool(touched),
+                    last_message_at=_now_iso(), last_error="" if touched else "connected; no fresh entitled quote events",
+                )
+                wait_seconds = DXFEED_POLL_SECONDS
+            except Exception as exc:
+                self._update_status(
+                    "dxfeed", "universal", connected=False, authenticated=False, subscribed=False,
+                    last_error=str(exc)[:300],
+                )
+                with self.lock:
+                    self.status["dxfeed:universal"].reconnects += 1
+                wait_seconds = min(max(wait_seconds * 1.5, DXFEED_POLL_SECONDS), 15.0)
+            elapsed = time.time() - started
+            self.stop_event.wait(max(0.05, wait_seconds - elapsed))
 
     def _run_massive(self, channel: str, subscriptions: list[str], reverse: dict[str, str]) -> None:
         if websocket is None or not self.massive_key:
@@ -896,6 +1080,7 @@ class LiveMarketHub:
     def configured_summary(self) -> dict[str, bool]:
         return {
             "mt5": bool(self.mt5_enabled and mt5 is not None),
+            "dxfeed": bool(self.dxfeed_rest_url),
             "massive": bool(self.massive_key and websocket is not None),
             "databento": bool(self.databento_key and db is not None),
         }
