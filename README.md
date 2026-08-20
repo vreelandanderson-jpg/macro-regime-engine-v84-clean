@@ -1,4 +1,4 @@
-# Macro Regime Engine v10.1 — Quote-Detected Extended Market Router
+# Macro Regime Engine v10.3 — Immediate Intelligence + Quote-Detected Router
 
 This build replaces the closed/reference-first behavior with a universal real-level router across the entire tracked instrument universe.
 
@@ -62,3 +62,11 @@ With a Massive Options entitlement, the selected instrument loads a 20-second-ca
 
 ## v10.1 collection integrity
 See `RELEASE_NOTES_v10.1.md`. The engine now separates source check age from market-event age and holds the last verified real value through transient collection failures.
+
+
+## v10.2 health semantics
+The command-center health card now measures collection/check health directly. A fresh polling/reference check is CURRENT rather than REFERENCE/IDLE; provider event age remains a separate diagnostic clock. See `RELEASE_NOTES_v10.2.md`.
+
+
+## v10.3 immediate intelligence
+The Command tab now surfaces an immediate decision read, problems-first attention table, clickable health focus, persistent observed-change ages, and fully interactive table consoles with search/filter/sort/column controls/row focus. Editable table overrides remain synchronized with strip cards. See `RELEASE_NOTES_v10.3.md`.

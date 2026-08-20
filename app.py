@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v10.1"
+APP_VERSION = "v10.3"
 MAX_DATA_AGE_SECONDS = 25
 CACHE_TTL_SECONDS = 10
 DEFAULT_REFRESH_SECONDS = 2
@@ -134,6 +134,17 @@ html, body, [data-testid="stAppViewContainer"]{
 .connection-provider{font-size:9px;letter-spacing:.10em;text-transform:uppercase;color:#8fa6bc;font-weight:900;}
 .connection-state{font-size:13px;font-weight:950;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .clock-live{color:var(--green)}.clock-stale{color:var(--red)}.clock-closed{color:#9db1c5}.clock-current{color:var(--yellow)}
+/* v10.3 immediate-intelligence surfaces */
+.action-read{border:1px solid #1a4c70;background:linear-gradient(180deg,#071a2a,#05101b);border-radius:12px;padding:9px 10px;margin-top:7px;}
+.action-read .headline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;}
+.action-read .headline b{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 8px;}
+.action-cell{min-width:0;border-top:1px solid #102c43;padding-top:4px;}
+.action-cell .k{font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#7f96ad;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.action-cell .v{font-size:10.5px;color:#eaf5ff;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;}
+.attention-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:2px 0 6px;}
+[data-testid="stDataFrame"]{border:1px solid #173957;border-radius:10px;overflow:hidden;}
+[data-testid="stDataFrame"] [role="columnheader"]{font-weight:900!important;}
 @media(max-width:1200px){
     .instrument-strip{grid-template-columns:repeat(3,minmax(0,1fr));}
     .decision-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
@@ -1029,7 +1040,11 @@ def mini_instrument_html(row: pd.Series, selected: bool = False) -> str:
     pct = float(row["change_pct"]) if pd.notna(row.get("change_pct", np.nan)) else 0.0
     tone = "green" if pct > 0 else "red" if pct < 0 else "yellow"
     cls = "mini-inst selected" if selected else "mini-inst"
-    fresh = str(row.get("freshness", "—"))
+    try:
+        intel = instrument_intelligence(row)
+        fresh = f"{intel['status']} · C{intel['check_age_sec']}s / E{intel['event_age_sec']}s"
+    except Exception:
+        fresh = str(row.get("freshness", "—"))
     return (
         f"<div class='{cls}'><div class='mini-symbol'>{row['symbol']}</div>"
         f"<div class='mini-price'>{short_num(row['latest_close'])}</div>"
@@ -1103,7 +1118,7 @@ def _table_column_config(columns: list[str]) -> dict:
             cfg[col] = st.column_config.NumberColumn(str(col), format="%.2f×")
         elif low == "volume_delta_pct":
             cfg[col] = st.column_config.NumberColumn(str(col), format="%+.2f%%")
-        elif low in {"age_sec", "age sec", "market_age_sec", "fetch_age_sec", "monitor_age_sec", "live_proxy_age_sec"}:
+        elif low in {"age_sec", "age sec", "check age", "event age", "market age", "fetch age", "market_age_sec", "fetch_age_sec", "collection_age_sec", "event_age_sec", "check_age_sec", "monitor_age_sec", "live_proxy_age_sec", "observed_price_change_age_sec", "observed_route_change_age_sec", "observed_source_change_age_sec", "observed_state_change_age_sec"}:
             cfg[col] = st.column_config.NumberColumn(str(col), format="%d")
     return cfg
 
@@ -1273,7 +1288,7 @@ def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[st
         return
     mode = st.radio(
         "View",
-        ["Strip Cards", "Editable Table", "Raw Table"],
+        ["Strip Cards", "Interactive Table", "Editable Table", "Raw Table"],
         index=0,
         horizontal=True,
         key=f"{key_prefix}_view_mode",
@@ -1282,28 +1297,20 @@ def render_strip_cards(view: pd.DataFrame, key_prefix: str, raw_columns: list[st
     cols = raw_columns or [c for c in view.columns if not str(c).startswith("_")]
     cols = [c for c in cols if c in view.columns]
 
+    if mode == "Interactive Table":
+        st.caption("Interactive display view · search, filter, sort, choose columns and click any row to focus it. Display overrides are applied.")
+        effective = apply_df_display_overrides(view[cols].copy())
+        render_interactive_table(effective, f"{key_prefix}_interactive", default_columns=cols[: min(14, len(cols))], height=420, select_symbol=True)
+        return
+
     if mode == "Editable Table":
         st.caption("Editable display table · edits persist through refresh and immediately propagate back into the matching strip card. Live feed values remain untouched underneath.")
-        effective = apply_df_display_overrides(view[cols].copy())
-        edited = render_editable_table(effective, f"{key_prefix}_editable_table", disabled=["symbol"] if "symbol" in cols else [])
-        any_change = False
-        if "symbol" in effective.columns:
-            for i in range(min(len(effective), len(edited))):
-                symbol = str(effective.iloc[i]["symbol"])
-                if save_symbol_display_overrides(symbol, effective.iloc[i], edited.iloc[i], cols):
-                    any_change = True
-        if any_change:
-            st.rerun()
+        render_editable_override_table(view[cols].copy(), f"{key_prefix}_editable_table", columns=cols)
         return
 
     if mode == "Raw Table":
-        st.caption("Raw synchronized feed view · display overrides are intentionally not applied here.")
-        st.dataframe(
-            view[cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config=_table_column_config(cols),
-        )
+        st.caption("Raw synchronized feed view · no display override is applied. Search, filter, sort and row focus remain available for audit.")
+        render_interactive_table(view[cols].copy(), f"{key_prefix}_raw", default_columns=cols[: min(14, len(cols))], height=420, select_symbol=True)
         return
 
     st.markdown(
@@ -1421,31 +1428,65 @@ def render_event_strips(events: pd.DataFrame) -> None:
         )
 
 
-def _active_age(rows: pd.DataFrame) -> int | None:
+def _collection_metrics(rows: pd.DataFrame) -> dict:
+    """Collection health is based on source-check age, never route/session labels.
+
+    Market-event age remains a separate diagnostic clock. A fresh POLL/REFERENCE
+    collection is therefore CURRENT, not IDLE, even when the latest market event
+    has not changed since the previous check.
+    """
     if rows is None or rows.empty:
-        return None
-    active = rows[rows["market_state"].isin(["LIVE", "EXTENDED"])] if "market_state" in rows else rows
-    ages = pd.to_numeric(active.get("market_age_sec", pd.Series(dtype=float)), errors="coerce")
-    ages = ages[np.isfinite(ages)]
-    return int(ages.max()) if len(ages) else None
+        return {"total": 0, "fresh": 0, "age": None, "status": "NO DATA", "tone": "red", "feed": "NONE"}
+
+    age_col = "collection_age_sec" if "collection_age_sec" in rows.columns else "fetch_age_sec"
+    ages = pd.to_numeric(rows.get(age_col, pd.Series(index=rows.index, dtype=float)), errors="coerce")
+    valid_ages = ages[np.isfinite(ages)]
+    total = int(len(rows))
+    fresh_mask = ages.notna() & np.isfinite(ages) & (ages <= MAX_DATA_AGE_SECONDS)
+    fresh = int(fresh_mask.sum())
+    max_age = int(valid_ages.max()) if len(valid_ages) else None
+
+    states = rows.get("collection_state", pd.Series([""] * total, index=rows.index)).fillna("").astype(str).str.upper()
+    degraded = states.str.contains("DEGRADED", regex=False).any()
+
+    if fresh == total and total > 0:
+        status = "DEGRADED" if degraded else "CURRENT"
+        tone = "yellow" if degraded else "green"
+    elif fresh > 0:
+        status = "PARTIAL"
+        tone = "yellow"
+    else:
+        status = "STALE"
+        tone = "red"
+
+    modes = []
+    if "feed_mode" in rows.columns:
+        for value in rows["feed_mode"].dropna().astype(str).str.upper():
+            value = value.strip()
+            if not value or value == "UNAVAILABLE":
+                continue
+            if value.startswith("HOLD"):
+                value = "HOLD"
+            modes.append(value)
+    unique_modes = sorted(set(modes))
+    feed = unique_modes[0] if len(unique_modes) == 1 else ("MIXED" if unique_modes else "UNKNOWN")
+
+    return {"total": total, "fresh": fresh, "age": max_age, "status": status, "tone": tone, "feed": feed}
 
 
-def health_rows(df: pd.DataFrame, selected_symbol: str) -> list[tuple[str, int | None, str, str]]:
+def health_rows(df: pd.DataFrame, selected_symbol: str) -> list[dict]:
     groups: list[tuple[str, pd.DataFrame]] = [
         ("Core", df[df["symbol"].isin(CORE)]),
         ("Selected", df[df["symbol"] == selected_symbol]),
         ("Sectors", df[df["category"].isin(["Sectors", "AI / Tech", "Healthcare / Science", "Defense / Aero", "Real Estate"])]),
         ("Universe", df),
     ]
-    rows: list[tuple[str, int | None, str, str]] = []
+    output: list[dict] = []
     for name, subset in groups:
-        age = _active_age(subset)
-        if age is None:
-            rows.append((name, None, "REFERENCE/IDLE", "yellow"))
-        else:
-            status, tone = health_state(age)
-            rows.append((name, age, status, tone))
-    return rows
+        metrics = _collection_metrics(subset)
+        metrics["name"] = name
+        output.append(metrics)
+    return output
 
 
 def option_underlying_for(symbol: str) -> str:
@@ -1513,17 +1554,452 @@ def option_chain_summary(df: pd.DataFrame) -> dict:
 
 
 def health_card(df: pd.DataFrame, selected_symbol: str) -> str:
-    pieces = ["<div class='card'><div class='section-title'>Active Market Data Health · Max 25s</div><div class='health-grid'>"]
-    for name, age, status, tone in health_rows(df, selected_symbol):
-        age_text = "—" if age is None else f"{age:02d}s"
-        pieces.append(f"<div>{name}</div><div class='{tone}'>{age_text} · {status}</div>")
-    pieces.append("</div></div>")
+    pieces = ["<div class='card'><div class='section-title'>Active Market Collection Health · Max 25s</div><div class='health-grid'>"]
+    for item in health_rows(df, selected_symbol):
+        age_text = "—" if item["age"] is None else f"{item['age']:02d}s"
+        coverage = f"{item['fresh']}/{item['total']}" if item["total"] else "0/0"
+        pieces.append(
+            f"<div>{item['name']}</div>"
+            f"<div class='{item['tone']}'>{item['status']} · {coverage} · {age_text} · {item['feed']}</div>"
+        )
+    pieces.append("</div><div class='micro' style='margin-top:6px'>Collection health uses CHECK AGE. Provider EVENT AGE remains separate in Diagnostics/Data Health.</div></div>")
     return "".join(pieces)
+
+
+
+
+def _safe_age(row: pd.Series, *keys: str, default: int = 999999) -> int:
+    for key in keys:
+        value = row.get(key, np.nan)
+        try:
+            if pd.notna(value) and np.isfinite(float(value)):
+                return max(0, int(float(value)))
+        except Exception:
+            continue
+    return default
+
+
+def _real_route_expected(row: pd.Series) -> bool:
+    feed_mode = str(row.get("feed_mode", "") or "").upper()
+    price_type = str(row.get("price_type", "") or "").upper()
+    market_state = str(row.get("market_state", "") or "").upper()
+    source = str(row.get("source", "") or "").upper()
+    return (
+        any(token in feed_mode for token in ("STREAM", "BROKER", "DIRECT"))
+        or any(token in price_type for token in ("BROKER", "DIRECT", "LIVE"))
+        or market_state in {"LIVE", "EXTENDED"}
+        or source.startswith("MT5")
+    )
+
+
+def instrument_intelligence(row: pd.Series) -> dict:
+    """Decision-facing health summary for one instrument.
+
+    The collection clock answers whether the engine is checking the route. The event
+    clock answers whether the provider has actually published a new market event.
+    They are deliberately not conflated.
+    """
+    symbol = str(row.get("symbol", "—") or "—")
+    price = pd.to_numeric(row.get("latest_close", np.nan), errors="coerce")
+    check_age = _safe_age(row, "collection_age_sec", "fetch_age_sec")
+    event_age = _safe_age(row, "event_age_sec", "market_age_sec")
+    monitor_age = _safe_age(row, "monitor_age_sec")
+    collection_state = str(row.get("collection_state", "") or "").upper()
+    market_state = str(row.get("market_state", "") or "").upper()
+    feed_mode = str(row.get("feed_mode", "") or "").upper()
+    source = str(row.get("source", "") or "")
+    price_type = str(row.get("price_type", "REFERENCE") or "REFERENCE")
+    source_ok = bool(row.get("source_ok", True))
+    direct_expected = _real_route_expected(row)
+
+    active_provider = str(row.get("active_provider_symbol", "") or "")
+    monitor_symbol = str(row.get("monitor_symbol", "") or "")
+    proxy_symbol = str(row.get("live_proxy_symbol", "") or "")
+    best_route = active_provider or (monitor_symbol if monitor_symbol and monitor_symbol != symbol else "") or proxy_symbol or symbol
+
+    if pd.isna(price) or market_state == "UNAVAILABLE" or not source_ok and check_age > MAX_DATA_AGE_SECONDS:
+        status, tone, severity = "UNAVAILABLE", "red", 4
+        issue = "NO VALID CURRENT LEVEL"
+        action = "RECOVER LIVE ROUTE"
+    elif check_age > MAX_DATA_AGE_SECONDS:
+        status, tone, severity = "STALE", "red", 3
+        issue = f"COLLECTION LATE · {check_age}s"
+        action = "RETRY / FAILOVER"
+    elif not source_ok:
+        status, tone, severity = "DEGRADED", "yellow", 2
+        issue = "SOURCE CHECK FAILED"
+        action = "VERIFY FAILOVER"
+    elif direct_expected and event_age > MAX_DATA_AGE_SECONDS:
+        status, tone, severity = "WATCH", "yellow", 2
+        issue = f"DIRECT EVENT LATE · {event_age}s"
+        action = "CHECK LIVE ROUTE"
+    elif "DEGRADED" in collection_state:
+        status, tone, severity = "DEGRADED", "yellow", 2
+        issue = "PRIMARY ROUTE DEGRADED"
+        action = "VERIFY FAILOVER"
+    elif ("POLL" in feed_mode or "FALLBACK" in feed_mode or "YFINANCE" in source.upper()) and event_age > 90:
+        status, tone, severity = "WATCH", "yellow", 1
+        issue = f"POLL EVENT AGE · {event_age}s"
+        action = "PREFER DIRECT FEED"
+    elif direct_expected:
+        status, tone, severity = "LIVE", "green", 0
+        issue = "NONE"
+        action = "USE CURRENT LEVEL"
+    else:
+        status, tone, severity = "CURRENT", "green", 0
+        if "POLL" in feed_mode or "FALLBACK" in feed_mode or "YFINANCE" in source.upper():
+            issue = f"REFERENCE/POLL · EVENT {event_age}s"
+            action = "DIRECT FEED FOR TICKS"
+        else:
+            issue = "NONE"
+            action = "USE CURRENT CHECK"
+
+    route_label = f"{best_route} · {price_type}"
+    if source:
+        route_label += f" · {source.split('·')[0].strip()}"
+
+    return {
+        "symbol": symbol,
+        "status": status,
+        "tone": tone,
+        "severity": severity,
+        "issue": issue,
+        "action": action,
+        "check_age_sec": check_age,
+        "event_age_sec": event_age,
+        "monitor_age_sec": monitor_age,
+        "route": route_label,
+        "best_route": best_route,
+        "feed_mode": feed_mode or "—",
+        "source": source or "—",
+        "price_type": price_type,
+        "market_state": market_state or "—",
+    }
+
+
+def update_observed_change_tracker(df: pd.DataFrame) -> pd.DataFrame:
+    """Track what changed between dashboard observations without altering feed data."""
+    out = df.copy()
+    tracker = st.session_state.setdefault("_instrument_change_tracker", {})
+    now_ts = time.time()
+    price_ages: list[float] = []
+    route_ages: list[float] = []
+    source_ages: list[float] = []
+    state_ages: list[float] = []
+
+    for _, row in out.iterrows():
+        symbol = str(row.get("symbol", ""))
+        price = pd.to_numeric(row.get("latest_close", np.nan), errors="coerce")
+        route = str(row.get("active_provider_symbol", "") or row.get("monitor_symbol", "") or symbol)
+        source = str(row.get("source", "") or "")
+        state = str(row.get("market_state", "") or row.get("freshness", "") or "")
+        old = tracker.get(symbol)
+        if old is None:
+            tracker[symbol] = {
+                "price": float(price) if pd.notna(price) else np.nan,
+                "route": route,
+                "source": source,
+                "state": state,
+                "price_changed_at": None,
+                "route_changed_at": None,
+                "source_changed_at": None,
+                "state_changed_at": None,
+                "first_seen_at": now_ts,
+            }
+            old = tracker[symbol]
+        else:
+            old_price = old.get("price", np.nan)
+            if pd.notna(price) and (pd.isna(old_price) or not math.isclose(float(price), float(old_price), rel_tol=0.0, abs_tol=1e-12)):
+                old["price_changed_at"] = now_ts
+                old["price"] = float(price)
+            if route != old.get("route"):
+                old["route_changed_at"] = now_ts
+                old["route"] = route
+            if source != old.get("source"):
+                old["source_changed_at"] = now_ts
+                old["source"] = source
+            if state != old.get("state"):
+                old["state_changed_at"] = now_ts
+                old["state"] = state
+
+        def _age(field: str) -> float:
+            stamp = old.get(field)
+            return max(0.0, now_ts - float(stamp)) if stamp else np.nan
+
+        price_ages.append(_age("price_changed_at"))
+        route_ages.append(_age("route_changed_at"))
+        source_ages.append(_age("source_changed_at"))
+        state_ages.append(_age("state_changed_at"))
+
+    out["observed_price_change_age_sec"] = price_ages
+    out["observed_route_change_age_sec"] = route_ages
+    out["observed_source_change_age_sec"] = source_ages
+    out["observed_state_change_age_sec"] = state_ages
+    return out
+
+
+def _age_label(value) -> str:
+    try:
+        if pd.isna(value):
+            return "not changed this session"
+        sec = max(0, int(float(value)))
+    except Exception:
+        return "—"
+    if sec < 60:
+        return f"{sec}s ago"
+    if sec < 3600:
+        return f"{sec // 60}m {sec % 60:02d}s ago"
+    return f"{sec // 3600}h {(sec % 3600) // 60:02d}m ago"
+
+
+def immediate_action_html(row: pd.Series) -> str:
+    info = instrument_intelligence(row)
+    driver = str(row.get("driver", "—") or "—")
+    price_change_age = _age_label(row.get("observed_price_change_age_sec", np.nan))
+    check = info["check_age_sec"]
+    event = info["event_age_sec"]
+    return (
+        "<div class='action-read'>"
+        "<div class='headline'>"
+        f"<b>Immediate read</b>{chip_html(info['status'], info['tone'])}"
+        "</div><div class='action-grid'>"
+        f"<div class='action-cell'><div class='k'>Active level</div><div class='v'>{short_num(row.get('latest_close'))}</div></div>"
+        f"<div class='action-cell'><div class='k'>Best route</div><div class='v'>{info['best_route']}</div></div>"
+        f"<div class='action-cell'><div class='k'>Check / event</div><div class='v'>{check}s / {event}s</div></div>"
+        f"<div class='action-cell'><div class='k'>Driver</div><div class='v'>{driver}</div></div>"
+        f"<div class='action-cell'><div class='k'>Issue</div><div class='v'>{info['issue']}</div></div>"
+        f"<div class='action-cell'><div class='k'>Last observed move</div><div class='v'>{price_change_age}</div></div>"
+        "</div></div>"
+    )
+
+
+def attention_frame(df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict] = []
+    for _, row in df.iterrows():
+        info = instrument_intelligence(row)
+        rows.append({
+            "symbol": row.get("symbol"),
+            "name": row.get("name"),
+            "category": row.get("category"),
+            "status": info["status"],
+            "issue": info["issue"],
+            "active_level": row.get("latest_close"),
+            "change_pct": row.get("change_pct"),
+            "check_age_sec": info["check_age_sec"],
+            "event_age_sec": info["event_age_sec"],
+            "best_route": info["best_route"],
+            "feed_mode": row.get("feed_mode", "—"),
+            "source": row.get("source", "—"),
+            "driver": row.get("driver", "—"),
+            "action": info["action"],
+            "_severity": info["severity"],
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out = out.sort_values(["_severity", "check_age_sec", "event_age_sec"], ascending=[False, False, False])
+    return out
+
+
+def _health_counts(df: pd.DataFrame) -> dict[str, int]:
+    counts = {"ALL": int(len(df)), "ATTENTION": 0, "LIVE": 0, "CURRENT": 0, "WATCH": 0, "DEGRADED": 0, "STALE": 0, "UNAVAILABLE": 0}
+    for _, row in df.iterrows():
+        status = instrument_intelligence(row)["status"]
+        counts[status] = counts.get(status, 0) + 1
+        if status in {"WATCH", "DEGRADED", "STALE", "UNAVAILABLE"}:
+            counts["ATTENTION"] += 1
+    return counts
+
+
+def _set_health_focus(value: str) -> None:
+    st.session_state["dashboard_health_focus"] = value
+
+
+def render_health_quick_panel(df: pd.DataFrame) -> None:
+    counts = _health_counts(df)
+    focus = st.session_state.get("dashboard_health_focus", "ATTENTION")
+    st.markdown("<div class='section-title'>Market Health · click to filter</div>", unsafe_allow_html=True)
+    grid = [("ATTN", "ATTENTION"), ("ALL", "ALL"), ("LIVE", "LIVE"), ("CURRENT", "CURRENT"), ("WATCH", "WATCH"), ("DEGRADED", "DEGRADED"), ("STALE", "STALE"), ("UNAVAIL", "UNAVAILABLE")]
+    for start in range(0, len(grid), 2):
+        cols = st.columns(2, gap="small")
+        for col, (label, value) in zip(cols, grid[start:start + 2]):
+            with col:
+                count = counts.get(value, 0)
+                st.button(
+                    f"{label} · {count}",
+                    key=f"health_focus_{value}",
+                    use_container_width=True,
+                    on_click=_set_health_focus,
+                    args=(value,),
+                )
+    st.caption(f"Active filter: {focus} · collection clock and provider-event clock remain separate.")
+
+
+def _quick_filter_mask(df: pd.DataFrame, quick: str) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=bool, index=df.index)
+    if "status" in df.columns and df["status"].astype(str).str.upper().isin(["LIVE", "CURRENT", "WATCH", "DEGRADED", "STALE", "UNAVAILABLE"]).any():
+        statuses = df["status"].fillna("").astype(str).str.upper()
+    else:
+        statuses = df.apply(lambda r: instrument_intelligence(r)["status"], axis=1)
+    if quick == "Attention":
+        return statuses.isin(["WATCH", "DEGRADED", "STALE", "UNAVAILABLE"])
+    if quick == "Live / Current":
+        return statuses.isin(["LIVE", "CURRENT"])
+    if quick == "Stale / Unavailable":
+        return statuses.isin(["STALE", "UNAVAILABLE"])
+    if quick == "Direct live":
+        return df.apply(_real_route_expected, axis=1)
+    if quick == "Poll / fallback":
+        mode = df.get("feed_mode", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str.upper()
+        source = df.get("source", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str.upper()
+        return mode.str.contains("POLL|FALLBACK", regex=True) | source.str.contains("YFINANCE", regex=False)
+    return pd.Series(True, index=df.index)
+
+
+def render_interactive_table(
+    df: pd.DataFrame,
+    key: str,
+    *,
+    default_columns: list[str] | None = None,
+    height: int = 330,
+    select_symbol: bool = True,
+    forced_status: str | None = None,
+    max_rows: int | None = None,
+) -> pd.DataFrame:
+    """Native Streamlit table console: search, filters, sorting, column control and row focus."""
+    work = df.copy()
+    if work.empty:
+        st.info("No rows match this view.")
+        return work
+
+    all_columns = [str(c) for c in work.columns if not str(c).startswith("_")]
+    default_columns = [c for c in (default_columns or all_columns) if c in all_columns]
+    if not default_columns:
+        default_columns = all_columns[: min(12, len(all_columns))]
+
+    t1, t2, t3 = st.columns([2.0, 1.2, 1.2], gap="small")
+    with t1:
+        search = st.text_input("Search table", key=f"{key}_search", placeholder="symbol, source, driver, issue…", label_visibility="collapsed")
+    with t2:
+        quick = st.selectbox(
+            "Quick filter",
+            ["All", "Attention", "Live / Current", "Stale / Unavailable", "Direct live", "Poll / fallback"],
+            key=f"{key}_quick",
+            label_visibility="collapsed",
+        )
+    with t3:
+        sort_col = st.selectbox("Sort", ["Keep current order"] + all_columns, key=f"{key}_sort", label_visibility="collapsed")
+
+    with st.popover("FILTERS / COLUMNS", use_container_width=True):
+        categories = []
+        if "category" in work.columns:
+            categories = st.multiselect("Category", sorted(work["category"].dropna().astype(str).unique().tolist()), key=f"{key}_cats")
+        sources = []
+        if "source" in work.columns:
+            sources = st.multiselect("Source", sorted(work["source"].dropna().astype(str).unique().tolist()), key=f"{key}_sources")
+        feeds = []
+        if "feed_mode" in work.columns:
+            feeds = st.multiselect("Feed mode", sorted(work["feed_mode"].dropna().astype(str).unique().tolist()), key=f"{key}_feeds")
+        visible = st.multiselect("Visible columns", all_columns, default=default_columns, key=f"{key}_visible")
+        direction = st.radio("Sort direction", ["Descending", "Ascending"], horizontal=True, key=f"{key}_direction")
+        csv_bytes = work[all_columns].to_csv(index=False).encode("utf-8")
+        st.download_button("EXPORT CURRENT DATASET", csv_bytes, file_name=f"{key}.csv", mime="text/csv", use_container_width=True, key=f"{key}_download")
+
+    mask = pd.Series(True, index=work.index)
+    if search:
+        needle = search.strip().upper()
+        search_cols = [c for c in all_columns if work[c].dtype == object or c in {"symbol", "name", "source", "driver", "status", "issue"}]
+        if search_cols:
+            text = work[search_cols].fillna("").astype(str).agg(" ".join, axis=1).str.upper()
+            mask &= text.str.contains(needle, regex=False)
+    if quick != "All":
+        mask &= _quick_filter_mask(work, quick)
+    if "status" in work.columns and work["status"].astype(str).str.upper().isin(["LIVE", "CURRENT", "WATCH", "DEGRADED", "STALE", "UNAVAILABLE"]).any():
+        health_statuses = work["status"].fillna("").astype(str).str.upper()
+    else:
+        health_statuses = work.apply(lambda r: instrument_intelligence(r)["status"], axis=1)
+    if forced_status and forced_status not in {"ALL", "ATTENTION"}:
+        mask &= health_statuses.eq(forced_status)
+    elif forced_status == "ATTENTION":
+        mask &= health_statuses.isin(["WATCH", "DEGRADED", "STALE", "UNAVAILABLE"])
+    if "category" in work.columns and categories:
+        mask &= work["category"].astype(str).isin(categories)
+    if "source" in work.columns and sources:
+        mask &= work["source"].astype(str).isin(sources)
+    if "feed_mode" in work.columns and feeds:
+        mask &= work["feed_mode"].astype(str).isin(feeds)
+
+    filtered = work.loc[mask].copy()
+    if sort_col != "Keep current order" and sort_col in filtered.columns:
+        try:
+            filtered = filtered.sort_values(sort_col, ascending=(direction == "Ascending"), na_position="last")
+        except Exception:
+            filtered = filtered.sort_values(sort_col, key=lambda s: s.astype(str), ascending=(direction == "Ascending"), na_position="last")
+    if max_rows:
+        filtered = filtered.head(max_rows)
+
+    shown_cols = [c for c in visible if c in filtered.columns]
+    symbol_col = "symbol" if "symbol" in filtered.columns else "SOURCE" if "SOURCE" in filtered.columns else None
+    if select_symbol and symbol_col and symbol_col not in shown_cols:
+        shown_cols = [symbol_col] + shown_cols
+    if not shown_cols:
+        shown_cols = all_columns[: min(8, len(all_columns))]
+
+    table_df = filtered[shown_cols].copy()
+    try:
+        event = st.dataframe(
+            table_df,
+            use_container_width=True,
+            hide_index=True,
+            height=height,
+            column_config=_table_column_config(shown_cols),
+            key=f"{key}_grid",
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+        rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+        if select_symbol and rows and symbol_col and symbol_col in table_df.columns:
+            selected_row = int(rows[0])
+            if 0 <= selected_row < len(table_df):
+                symbol = str(table_df.iloc[selected_row][symbol_col])
+                if symbol and st.session_state.get("selected_symbol") != symbol:
+                    st.session_state.selected_symbol = symbol
+                    st.rerun()
+    except TypeError:
+        # Backward-compatible rendering if an older Streamlit runtime lacks row-selection callbacks.
+        st.dataframe(table_df, use_container_width=True, hide_index=True, height=height, column_config=_table_column_config(shown_cols))
+    st.caption(f"Showing {len(table_df)}/{len(work)} rows · click a row to focus the instrument · column headers sort · toolbar search/download remain available.")
+    return filtered
+
+
+def render_editable_override_table(df: pd.DataFrame, key: str, *, columns: list[str] | None = None) -> pd.DataFrame:
+    """Editable table that persists display overrides by symbol, independent of row order."""
+    if df.empty:
+        st.info("No rows match this view.")
+        return df
+    cols = [c for c in (columns or list(df.columns)) if c in df.columns]
+    effective = apply_df_display_overrides(df[cols].copy())
+    edited = render_editable_table(effective, key, disabled=["symbol"] if "symbol" in cols else [])
+    any_change = False
+    if "symbol" in effective.columns and "symbol" in edited.columns:
+        baseline = effective.set_index("symbol", drop=False)
+        for _, edited_row in edited.iterrows():
+            symbol = str(edited_row.get("symbol", ""))
+            if symbol in baseline.index:
+                original = baseline.loc[symbol]
+                if isinstance(original, pd.DataFrame):
+                    original = original.iloc[0]
+                if save_symbol_display_overrides(symbol, original, edited_row, cols):
+                    any_change = True
+    if any_change:
+        st.rerun()
+    return edited
 
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v10.0</span></div><div class='small'>COLLECTION-INTEGRITY LIVE ROUTER · GEO + MARKET</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>{APP_VERSION}</span></div><div class='small'>IMMEDIATE INTELLIGENCE ROUTER · GEO + MARKET</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -1592,15 +2068,16 @@ st.session_state.setdefault("runtime_dxfeed_username", "")
 st.session_state.setdefault("runtime_dxfeed_password", "")
 st.session_state.setdefault("runtime_dxfeed_token", "")
 st.session_state.setdefault("runtime_dxfeed_symbol_map_json", "")
+st.session_state.setdefault("dashboard_health_focus", "ATTENTION")
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v101")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v103")
 
 # One universe state, continuously overlaid by provider WebSockets. Stream ingestion is
 # independent of Streamlit reruns; every page reads the same thread-safe live hub.
 raw_universe, live_hub = build_market_snapshot(tuple(SYMBOLS))
-universe_df = enrich(raw_universe)
+universe_df = update_observed_change_tracker(enrich(raw_universe))
 _active = universe_df[universe_df["market_state"].isin(["LIVE", "EXTENDED"])] if not universe_df.empty else universe_df
 snapshot_age = int(_active["market_age_sec"].max()) if len(_active) else 0
 snapshot_state, snapshot_tone = health_state(snapshot_age) if len(_active) else ("IDLE", "yellow")
@@ -1611,6 +2088,7 @@ check_stale = max(0, check_total - check_fresh)
 active_total = int(len(_active))
 active_fresh = int((pd.to_numeric(_active.get("market_age_sec", pd.Series(dtype=float)), errors="coerce") <= MAX_DATA_AGE_SECONDS).sum()) if active_total else 0
 active_stale = max(0, active_total - active_fresh)
+health_counts = _health_counts(universe_df)
 check_tone = "green" if check_stale == 0 else "yellow" if check_fresh >= max(1, int(check_total * .85)) else "red"
 provider_status = live_hub.provider_status()
 provider_config = live_hub.configured_summary()
@@ -1655,9 +2133,9 @@ with h5:
 st.markdown("</div>", unsafe_allow_html=True)
 
 selected_symbol = st.session_state.selected_symbol
-selected = get_row(universe_df, selected_symbol)
+selected = apply_row_display_overrides(get_row(universe_df, selected_symbol))
 related = related_symbols(selected_symbol)
-rel_df = universe_df[universe_df["symbol"].isin(related)].copy()
+rel_df = apply_df_display_overrides(universe_df[universe_df["symbol"].isin(related)].copy())
 rel_df["_order"] = rel_df["symbol"].apply(lambda x: related.index(x) if x in related else 99)
 rel_df = rel_df.sort_values("_order")
 core_state = compute_core_state(universe_df)
@@ -1683,7 +2161,7 @@ if page == "Dashboard":
         with s5:
             st.markdown(card_html("Market State", state_for(core_state["macro"]), "composite", color_for(core_state["macro"]), "NOW"), unsafe_allow_html=True)
         with s6:
-            st.markdown(card_html("Live Checks", f"{check_fresh}/{check_total}", f"active {active_fresh}/{active_total} · stale {check_stale}", check_tone, "≤25s"), unsafe_allow_html=True)
+            st.markdown(card_html("Live Checks", f"{check_fresh}/{check_total}", f"live {health_counts.get('LIVE',0)} · current {health_counts.get('CURRENT',0)} · attn {health_counts.get('ATTENTION',0)}", check_tone, "≤25s"), unsafe_allow_html=True)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         left, center, right = st.columns([1.05, 2.35, .95], gap="small")
@@ -1708,19 +2186,23 @@ if page == "Dashboard":
                 </div>
                 """, unsafe_allow_html=True,
             )
-            with st.popover("Instrument details", use_container_width=True):
-                st.caption(f"Category: {selected['category']}")
-                st.caption(f"Driver: {selected['driver']}")
-                st.caption(f"Source: {selected['source']} · {selected.get('feed_mode','—')} · {selected.get('price_type','REFERENCE')}")
-                st.caption(f"Provider symbol: {selected.get('active_provider_symbol', selected.get('symbol','—'))}")
-                st.caption(f"Market state: {selected.get('market_state','—')}")
-                if pd.notna(selected.get("reference_price", np.nan)) and (str(selected.get("source", "")) != str(selected.get("reference_source", "")) or str(selected.get("price_type", "")).startswith("BROKER")):
-                    st.caption(f"Official/reference: {short_num(selected.get('reference_price'))} · {selected.get('reference_source','—')} · {selected.get('reference_provider_ts') or '—'}")
-                st.caption(f"Provider event age: {int(selected.get('market_age_sec',999999))} sec")
+            st.markdown(immediate_action_html(selected), unsafe_allow_html=True)
+            with st.popover("Provider audit", use_container_width=True):
+                intel = instrument_intelligence(selected)
+                st.metric("Usability", intel["status"])
+                st.caption(f"Active level: {short_num(selected.get('latest_close'))}")
+                st.caption(f"Best route: {intel['route']}")
+                st.caption(f"Check age: {intel['check_age_sec']} sec · provider event age: {intel['event_age_sec']} sec")
+                st.caption(f"Issue: {intel['issue']} · action: {intel['action']}")
+                st.caption(f"Category: {selected['category']} · driver: {selected['driver']}")
+                st.caption(f"Market state: {selected.get('market_state','—')} · feed: {selected.get('feed_mode','—')}")
                 st.caption(f"Last provider event: {selected.get('provider_ts') or '—'}")
-                st.caption(f"Always-on check: {selected.get('monitor_status','—')} · {selected.get('monitor_symbol','—')} @ {short_num(selected.get('monitor_price'))} · age {int(selected.get('monitor_age_sec',999999))}s")
+                st.caption(f"Last observed price move: {_age_label(selected.get('observed_price_change_age_sec', np.nan))}")
+                st.caption(f"Last observed route change: {_age_label(selected.get('observed_route_change_age_sec', np.nan))}")
+                if pd.notna(selected.get("reference_price", np.nan)):
+                    st.caption(f"Reference: {short_num(selected.get('reference_price'))} · {selected.get('reference_source','—')} · {selected.get('reference_provider_ts') or '—'}")
                 if selected.get("live_proxy_symbol"):
-                    st.caption(f"Live closed-market proxy: {selected.get('live_proxy_symbol')} @ {short_num(selected.get('live_proxy_price'))} · age {int(selected.get('live_proxy_age_sec',999999))}s")
+                    st.caption(f"Live proxy: {selected.get('live_proxy_symbol')} @ {short_num(selected.get('live_proxy_price'))} · age {int(selected.get('live_proxy_age_sec',999999))}s")
 
         with center:
             st.markdown("<div class='shell'><div class='section-title'>Universal Instrument Map · click symbol to focus</div>", unsafe_allow_html=True)
@@ -1761,7 +2243,7 @@ if page == "Dashboard":
                 with st.popover("Open flow", use_container_width=True):
                     st.write("Where live quote entitlement exists, bid/ask and L1 imbalance come directly from Massive NBBO or Databento MBP-1. Other instruments retain the synchronized proxy layer.")
                     mini_cols = [c for c in ["symbol", "change_pct", "bid", "ask", "bid_size", "ask_size", "book_imbalance", "spread", "orderflow_source", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "score", "state"] if c in rel_df.columns]
-                    st.dataframe(rel_df[mini_cols].head(10), use_container_width=True, hide_index=True, column_config=_table_column_config(mini_cols))
+                    render_interactive_table(rel_df[mini_cols].head(10), "dashboard_flow_table", default_columns=mini_cols, height=280, select_symbol=True)
             with c2:
                 st.markdown(
                     f"<div class='card compact'><div class='section-title'>Instrument Pressure</div>"
@@ -1785,25 +2267,48 @@ if page == "Dashboard":
                 )
                 with st.popover("Open driver", use_container_width=True):
                     drivers = universe_df[universe_df["symbol"].isin(["DX-Y.NYB", "^TNX", "^VIX", "SMH", "HYG"])][["symbol", "name", "change_pct", "score", "state"]]
-                    st.dataframe(drivers, use_container_width=True, hide_index=True, column_config=_table_column_config(list(drivers.columns)))
+                    render_interactive_table(drivers, "dashboard_driver_table", default_columns=list(drivers.columns), height=260, select_symbol=True)
 
         with right:
-            st.markdown(health_card(universe_df, selected_symbol), unsafe_allow_html=True)
+            render_health_quick_panel(universe_df)
             st.markdown("<div style='height:7px'></div>", unsafe_allow_html=True)
+            selected_intel = instrument_intelligence(selected)
             alerts = [
-                (selected["symbol"], selected["state"]),
+                (selected["symbol"], selected_intel["status"]),
+                ("Issue", selected_intel["issue"]),
                 ("Driver", cause["cause"]),
-                ("Session", sess["active"]),
                 ("Checks", f"{check_fresh}/{check_total} ≤25s"),
             ]
-            alert_html = "<div class='card compact'><div class='section-title'>Alerts</div>" + "".join(
+            alert_html = "<div class='card compact'><div class='section-title'>Immediate Alerts</div>" + "".join(
                 f"<div class='rowline'><span>{a}</span><b>{b}</b></div>" for a, b in alerts
             ) + "</div>"
             st.markdown(alert_html, unsafe_allow_html=True)
-            with st.popover("Data details", use_container_width=True):
-                st.write("All dashboard modules read from the same synchronized universe snapshot. No tier is allowed a refresh cadence above 25 seconds.")
+            with st.popover("Data audit", use_container_width=True):
+                st.write("Collection health and provider-event health are tracked separately. A current check does not manufacture a current market event.")
                 st.caption(f"Snapshot created: {universe_df['updated'].iloc[0] if len(universe_df) else '—'}")
                 st.caption(f"Provider rows OK: {int(universe_df['source_ok'].sum())}/{len(universe_df)}")
+                st.caption(f"Selected route: {selected_intel['route']}")
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        attention = attention_frame(universe_df)
+        focus = st.session_state.get("dashboard_health_focus", "ATTENTION")
+        if focus == "ATTENTION":
+            focus_rows = attention[attention["status"].isin(["WATCH", "DEGRADED", "STALE", "UNAVAILABLE"])].copy()
+            if focus_rows.empty:
+                focus_rows = attention.head(12).copy()
+                attention_note = "No critical attention rows right now · showing the slowest/current routes for verification."
+            else:
+                attention_note = "Problems first · click a row to focus that instrument."
+        elif focus == "ALL":
+            focus_rows = attention.copy()
+            attention_note = "All instruments · problems remain sorted to the top."
+        else:
+            focus_rows = attention[attention["status"] == focus].copy()
+            attention_note = f"Health filter: {focus}."
+        st.markdown(f"<div class='shell'><div class='attention-head'><div class='section-title' style='margin:0'>Immediate Market Attention</div><div class='small'>{attention_note}</div></div>", unsafe_allow_html=True)
+        attn_cols = [c for c in ["symbol", "status", "issue", "active_level", "change_pct", "check_age_sec", "event_age_sec", "best_route", "feed_mode", "driver", "action"] if c in focus_rows.columns]
+        render_interactive_table(focus_rows, "dashboard_attention", default_columns=attn_cols, height=235, select_symbol=True, max_rows=40)
+        st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         px = float(selected["latest_close"])
@@ -1867,17 +2372,21 @@ if page == "Dashboard":
             cat_summary = universe_df.groupby("category", as_index=False).agg(score=("score", "mean"), change_pct=("change_pct", "mean"))
             cat_summary["state"] = cat_summary["score"].apply(state_for)
             cat_summary = cat_summary.sort_values("score", ascending=False)
-            st.dataframe(cat_summary, use_container_width=True, hide_index=True, column_config=_table_column_config(list(cat_summary.columns)))
+            render_interactive_table(cat_summary, "regime_category_table", default_columns=list(cat_summary.columns), height=330, select_symbol=False)
 
     with diag_tab:
         st.markdown("<div class='shell'><div class='section-title'>Selected Instrument · synchronized direct data</div>", unsafe_allow_html=True)
         diag_cols = [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "market_state", "collection_state", "collection_age_sec", "event_age_sec", "market_age_sec", "freshness", "source", "feed_mode", "price_type", "active_provider_symbol", "reference_price", "reference_source", "provider_ts", "live_proxy_symbol", "live_proxy_price", "bid", "ask", "book_imbalance", "role"] if c in rel_df.columns]
-        render_editable_table(rel_df[diag_cols].copy(), "dashboard_diagnostics_table")
+        diag_mode = st.radio("Diagnostics mode", ["Inspect", "Edit display"], horizontal=True, key="dashboard_diag_mode", label_visibility="collapsed")
+        if diag_mode == "Edit display":
+            render_editable_override_table(rel_df[diag_cols].copy(), "dashboard_diagnostics_edit", columns=diag_cols)
+        else:
+            render_interactive_table(rel_df[diag_cols].copy(), "dashboard_diagnostics_table", default_columns=diag_cols, height=380, select_symbol=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
 
 elif page == "Instruments":
-    st.markdown("<div class='shell'><div class='section-title'>Universal Instruments · Interactive Strip Matrix</div><div class='small'>Strip Cards are the primary presentation only. Click any instrument to expose 100% of its current fields; switch to Raw Table at any time.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='shell'><div class='section-title'>Universal Instruments · Interactive Strip + Table Matrix</div><div class='small'>Strip Cards remain the primary presentation. Interactive Table adds search/filter/sort/row focus; Editable Table keeps display edits persistent; Raw Table stays auditable.</div>", unsafe_allow_html=True)
     f1, f2 = st.columns([1.1, 2.3])
     with f1:
         cat = st.selectbox("Filter", ["All"] + sorted(universe_df["category"].unique().tolist()))
@@ -1939,7 +2448,7 @@ elif page == "Options / Pressure":
             if type_pick != "All":
                 chain_view = chain_view[chain_view["type"] == type_pick]
             display_cols = ["contract", "type", "expiration", "strike", "bid", "ask", "mid", "last", "volume", "open_interest", "iv", "delta", "gamma", "theta", "vega", "quote_timeframe", "trade_timeframe"]
-            st.dataframe(chain_view[display_cols].head(250), use_container_width=True, hide_index=True)
+            render_interactive_table(chain_view[display_cols].head(250), "options_chain_table", default_columns=display_cols, height=420, select_symbol=False)
     else:
         if provider_config.get("massive") and opt_underlying:
             st.warning("No options chain returned for this underlying/entitlement. The instrument's live routed level continues independently.")
@@ -2007,6 +2516,7 @@ elif page == "Events":
 elif page == "Data Health":
     st.markdown("<div class='shell'><div class='section-title'>Data Health · Collection Integrity + Provider Clocks</div>", unsafe_allow_html=True)
     st.markdown(health_card(universe_df, selected_symbol), unsafe_allow_html=True)
+    render_health_quick_panel(universe_df)
 
     cfg1, cfg2, cfg3, cfg4, cfg5 = st.columns(5)
     with cfg1:
@@ -2030,15 +2540,22 @@ elif page == "Data Health":
         pstat["state"] = pstat.apply(lambda r: "STREAMING" if r.get("connected") and r.get("authenticated") else "NOT CONFIGURED" if not r.get("configured") else "CONNECTING / RETRY", axis=1)
         pstat["message_age_sec"] = pstat["last_message_at"].apply(_seconds_since)
         st.markdown("<div class='section-title' style='margin-top:8px'>Provider Connections</div>", unsafe_allow_html=True)
-        st.dataframe(pstat[["provider", "channel", "state", "message_age_sec", "last_message_at", "reconnects", "last_error"]], use_container_width=True, hide_index=True)
+        provider_cols = ["provider", "channel", "state", "message_age_sec", "last_message_at", "reconnects", "last_error"]
+        render_interactive_table(pstat[provider_cols], "provider_connections_table", default_columns=provider_cols, height=280, select_symbol=False)
 
     st.markdown("<div class='section-title' style='margin-top:8px'>Per-Instrument Collection + Market Clocks</div>", unsafe_allow_html=True)
     st.caption("DIRECT/BROKER LIVE = a real provider is publishing an actual level for this dashboard instrument now. OFFICIAL INDEX = the calculating index feed. REFERENCE/PROXY is used only when no direct real quote exists. The original official/reference value is always retained separately for audit.")
     health_cols = [c for c in ["symbol", "name", "category", "market_state", "latest_close", "price_type", "active_provider_symbol", "reference_price", "reference_source", "collection_age_sec", "event_age_sec", "market_age_sec", "fetch_age_sec", "collection_state", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "source", "feed_mode", "provider_ts", "received_ts", "source_ok"] if c in universe_df.columns]
     health_view = universe_df[health_cols].copy()
+    health_view["status"] = health_view.apply(lambda r: instrument_intelligence(r)["status"], axis=1)
+    health_view["issue"] = health_view.apply(lambda r: instrument_intelligence(r)["issue"], axis=1)
+    health_view["action"] = health_view.apply(lambda r: instrument_intelligence(r)["action"], axis=1)
     if "monitor_age_sec" in health_view.columns:
         health_view = health_view.sort_values(["monitor_age_sec", "symbol"], ascending=[False, True], na_position="first")
-    st.dataframe(health_view, use_container_width=True, hide_index=True, column_config=_table_column_config(list(health_view.columns)))
+    health_default = [c for c in ["symbol", "status", "issue", "latest_close", "collection_age_sec", "event_age_sec", "active_provider_symbol", "source", "feed_mode", "action", "category"] if c in health_view.columns]
+    health_focus = st.session_state.get("dashboard_health_focus", "ATTENTION")
+    health_forced = health_focus if health_focus != "ATTENTION" or health_counts.get("ATTENTION", 0) > 0 else None
+    render_interactive_table(health_view, "data_health_instruments", default_columns=health_default, height=520, select_symbol=True, forced_status=health_forced)
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Raw Data":
@@ -2055,12 +2572,18 @@ elif page == "Raw Data":
     if raw_search:
         q = raw_search.upper()
         raw_view = raw_view[raw_view.apply(lambda r: q in f"{r['symbol']} {r['name']} {r['category']} {r['role']}".upper(), axis=1)]
+    raw_base = raw_view.copy()
     raw_view = raw_view.rename(columns={
         "symbol": "SOURCE", "category": "DOMAIN", "latest_close": "VALUE", "change_pct": "Δ %",
         "collection_age_sec": "CHECK AGE", "event_age_sec": "EVENT AGE", "market_age_sec": "MARKET AGE", "fetch_age_sec": "FETCH AGE", "freshness": "STATUS", "source": "FEED",
     })
-    raw_cols = [c for c in ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "market_state", "MARKET AGE", "FETCH AGE", "STATUS", "FEED", "feed_mode", "provider_ts", "received_ts", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "monitor_source", "price_type", "active_provider_symbol", "reference_price", "reference_source", "reference_provider_ts", "source_ok"] if c in raw_view.columns]
-    render_editable_table(raw_view[raw_cols].copy(), "raw_data_table")
+    raw_cols = [c for c in ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "score", "quality", "state", "market_state", "CHECK AGE", "EVENT AGE", "MARKET AGE", "FETCH AGE", "STATUS", "FEED", "feed_mode", "provider_ts", "received_ts", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "monitor_source", "price_type", "active_provider_symbol", "reference_price", "reference_source", "reference_provider_ts", "source_ok"] if c in raw_view.columns]
+    raw_mode = st.radio("Raw console mode", ["Inspect", "Edit display"], horizontal=True, key="raw_console_mode", label_visibility="collapsed")
+    if raw_mode == "Edit display":
+        editable_cols = [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "role", "driver", "market_state", "source", "feed_mode", "price_type"] if c in raw_base.columns]
+        render_editable_override_table(raw_base[editable_cols].copy(), "raw_data_edit", columns=editable_cols)
+    else:
+        render_interactive_table(raw_view[raw_cols].copy(), "raw_data_table", default_columns=raw_cols[: min(18, len(raw_cols))], height=560, select_symbol=True)
     with st.expander("Selected raw payload", expanded=False):
         r = selected.to_dict()
         st.json({k: (float(v) if isinstance(v, np.floating) else int(v) if isinstance(v, np.integer) else v) for k, v in r.items()})

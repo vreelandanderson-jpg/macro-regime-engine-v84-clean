@@ -1,4 +1,4 @@
-# Deploy v10.1
+# Deploy v10.3
 
 ## Standard / cloud
 
@@ -25,3 +25,7 @@ A provider plan may be delayed even though the connection itself is healthy. v10
 
 ## dxFeed production quote detection
 Set `DXFEED_REST_URL` to the production `.../webservice/rest/events.json` endpoint supplied by dxFeed. Authenticate with either `DXFEED_TOKEN` or `DXFEED_USERNAME` + `DXFEED_PASSWORD`. `DXFEED_SYMBOL_MAP_JSON` can override symbols using your IPF catalog. Provider events older than 25 seconds are rejected even if the HTTP request itself is fresh.
+
+
+## Interactive table runtime
+The build uses Streamlit's native dataframe row-selection API. `requirements.txt` keeps Streamlit >=1.35, which supports dataframe selection callbacks; deploy with the current Streamlit release when possible.
