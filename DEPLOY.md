@@ -1,4 +1,4 @@
-# Deploy v10.0
+# Deploy v10.1
 
 ## Standard / cloud
 
@@ -20,7 +20,7 @@ Keep the MT5 terminal open and logged in. The app auto-discovers it. Use `MT5_TE
 
 ## Important
 
-A provider plan may be delayed even though the connection itself is healthy. v10.0 uses the provider event timestamp; delayed events cannot become LIVE simply because the UI refreshed.
+A provider plan may be delayed even though the connection itself is healthy. v10.1 uses the provider event timestamp; delayed events cannot become LIVE simply because the UI refreshed.
 
 
 ## dxFeed production quote detection

@@ -1,4 +1,4 @@
-# Macro Regime Engine v10.0 — Quote-Detected Extended Market Router
+# Macro Regime Engine v10.1 — Quote-Detected Extended Market Router
 
 This build replaces the closed/reference-first behavior with a universal real-level router across the entire tracked instrument universe.
 
@@ -58,3 +58,7 @@ See `SOURCE_ROUTER.md` for exact source priority and active/reference behavior.
 ## Options / Pressure
 
 With a Massive Options entitlement, the selected instrument loads a 20-second-cached chain snapshot with actual bid/ask, last trade, volume, open interest, IV and Greeks. Futures/cash references use a clearly labeled liquid listed-options proxy (for example NQ/NDX -> QQQ); the instrument price itself still comes from the universal live router.
+
+
+## v10.1 collection integrity
+See `RELEASE_NOTES_v10.1.md`. The engine now separates source check age from market-event age and holds the last verified real value through transient collection failures.

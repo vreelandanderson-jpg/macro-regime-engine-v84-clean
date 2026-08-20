@@ -26,9 +26,9 @@ except Exception:  # pragma: no cover
 
 
 TZ = ZoneInfo("America/Toronto")
-APP_VERSION = "v10.0"
+APP_VERSION = "v10.1"
 MAX_DATA_AGE_SECONDS = 25
-CACHE_TTL_SECONDS = 20
+CACHE_TTL_SECONDS = 10
 DEFAULT_REFRESH_SECONDS = 2
 
 st.set_page_config(
@@ -329,15 +329,23 @@ def safe_symbol(query: str | None) -> str:
 
 
 def fallback_row(sym: str, snapshot_iso: str) -> dict:
-    """Compatibility constructor for unavailable data. Never manufactures prices."""
+    """Unavailable-data constructor. A collection attempt is recorded, but no price is invented."""
     return {
         "symbol": sym, "latest_close": np.nan, "change_pct": np.nan, "session_pct": np.nan,
         "volume": np.nan, "volume_1m": np.nan, "session_volume": np.nan,
         "relative_volume": np.nan, "volume_delta_pct": np.nan,
         "volume_source": "N/A", "volume_proxy_symbol": "",
         "provider_ts": None, "received_ts": snapshot_iso, "updated": None,
+        "check_ts": snapshot_iso, "check_attempted": True, "check_ok": False,
         "source": "unavailable", "source_ok": False, "feed_mode": "UNAVAILABLE",
+        "data_quality": "NO VALID QUOTE",
     }
+
+
+@st.cache_resource(show_spinner=False)
+def _last_verified_store() -> dict:
+    # Prevent a transient provider miss from erasing the last genuine value on the next UI rerun.
+    return {"rows": {}}
 
 
 def _volume_metrics(volume: pd.Series) -> dict:
@@ -390,19 +398,23 @@ def _apply_volume_proxies(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
-    """Public-feed baseline used only when a dedicated live provider has no fresh event.
+    """Timestamp-correct public collection baseline.
 
-    Provider timestamps come from the actual last bar. Missing symbols are retried
-    individually. Failed symbols remain unavailable; no synthetic market values exist.
+    Collection freshness and market-event freshness are deliberately separate:
+    ``received_ts`` means the engine checked the source now, while ``provider_ts`` is
+    the provider's actual last market event. A quiet instrument is therefore not
+    falsely treated as an un-checked instrument, and a delayed venue is never promoted
+    to direct LIVE merely because the HTTP request was fresh.
     """
     received_iso = now_et().isoformat()
     rows: list[dict] = []
     frames: dict[str, pd.DataFrame] = {}
+    store = _last_verified_store()["rows"]
     if yf is not None:
         try:
             data = yf.download(
                 list(symbols), period="1d", interval="1m", group_by="ticker", progress=False,
-                prepost=True, threads=True, auto_adjust=False,
+                prepost=True, threads=True, auto_adjust=False, timeout=12,
             )
             for sym in symbols:
                 try:
@@ -415,13 +427,15 @@ def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
         except Exception:
             pass
 
-        # Individual retry is intentionally isolated from the batch. One failed symbol
-        # cannot poison the synchronized universe.
+        # Missing-symbol retries are isolated; one bad ticker cannot poison the universe.
         for sym in symbols:
             if sym in frames:
                 continue
             try:
-                one = yf.download(sym, period="1d", interval="1m", progress=False, prepost=True, threads=False, auto_adjust=False)
+                one = yf.download(
+                    sym, period="1d", interval="1m", progress=False, prepost=True,
+                    threads=False, auto_adjust=False, timeout=8,
+                )
                 one = one.dropna(how="all")
                 if not one.empty:
                     frames[sym] = one
@@ -431,7 +445,19 @@ def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
     for sym in symbols:
         frame = frames.get(sym)
         if frame is None or frame.empty:
-            rows.append(fallback_row(sym, received_iso))
+            prior = store.get(sym)
+            if prior:
+                held = dict(prior)
+                held.update({
+                    "received_ts": received_iso, "check_ts": received_iso,
+                    "check_attempted": True, "check_ok": False, "source_ok": False,
+                    "feed_mode": "HOLD LAST VERIFIED",
+                    "source": f"{prior.get('source','public')} · retry failed",
+                    "data_quality": "LAST VERIFIED · COLLECTION DEGRADED",
+                })
+                rows.append(held)
+            else:
+                rows.append(fallback_row(sym, received_iso))
             continue
         try:
             close = frame["Close"].dropna()
@@ -451,16 +477,30 @@ def fetch_universe_snapshot(symbols: tuple[str, ...]) -> pd.DataFrame:
                 provider_ts = ts.tz_convert(TZ).isoformat()
             except Exception:
                 provider_ts = None
-            rows.append({
+            row = {
                 "symbol": sym, "latest_close": last, "change_pct": pct, "session_pct": session_pct,
                 "volume": vm["session_volume"], **vm,
                 "volume_source": "Actual" if pd.notna(vm["session_volume"]) else "N/A",
                 "volume_proxy_symbol": "",
                 "provider_ts": provider_ts, "received_ts": received_iso, "updated": provider_ts,
-                "source": "yfinance · fallback", "source_ok": True, "feed_mode": "POLL FALLBACK",
-            })
+                "check_ts": received_iso, "check_attempted": True, "check_ok": True,
+                "source": "yfinance · public check", "source_ok": True, "feed_mode": "POLL",
+                "data_quality": "PUBLIC MARKET EVENT",
+            }
+            store[sym] = dict(row)
+            rows.append(row)
         except Exception:
-            rows.append(fallback_row(sym, received_iso))
+            prior = store.get(sym)
+            if prior:
+                held = dict(prior)
+                held.update({
+                    "received_ts": received_iso, "check_ts": received_iso,
+                    "check_attempted": True, "check_ok": False, "source_ok": False,
+                    "feed_mode": "HOLD LAST VERIFIED", "data_quality": "LAST VERIFIED · PARSE DEGRADED",
+                })
+                rows.append(held)
+            else:
+                rows.append(fallback_row(sym, received_iso))
     return _apply_volume_proxies(pd.DataFrame(rows))
 
 
@@ -651,6 +691,10 @@ def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveM
     for sym, tick in live.items():
         if sym not in baseline.index:
             continue
+        if str(tick.get("feed_mode", "") or "").upper() == "STREAM":
+            live_event_age = _seconds_since(tick.get("provider_ts"))
+            if live_event_age > MAX_DATA_AGE_SECONDS:
+                continue
         for key, value in tick.items():
             if key == "symbol" or value is None:
                 continue
@@ -672,7 +716,9 @@ def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveM
     # Session schedule is context only. It never creates LIVE/EXTENDED.
     out["session_reference_state"] = out["symbol"].apply(market_state_for_symbol)
     out["market_age_sec"] = out.apply(lambda r: _seconds_since(r.get("provider_ts") or r.get("updated")), axis=1)
-    out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts")), axis=1)
+    out["event_age_sec"] = out["market_age_sec"]
+    out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts") or r.get("check_ts")), axis=1)
+    out["collection_age_sec"] = out["fetch_age_sec"]
     if "route_accuracy" not in out.columns:
         out["route_accuracy"] = "REFERENCE"
     else:
@@ -722,26 +768,43 @@ def build_market_snapshot(symbols: tuple[str, ...]) -> tuple[pd.DataFrame, LiveM
                 out.at[i, fld] = route.get(fld)
 
     out["market_age_sec"] = out.apply(lambda r: _seconds_since(r.get("provider_ts") or r.get("updated")), axis=1)
-    out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts")), axis=1)
+    out["event_age_sec"] = out["market_age_sec"]
+    out["fetch_age_sec"] = out.apply(lambda r: _seconds_since(r.get("received_ts") or r.get("check_ts")), axis=1)
+    out["collection_age_sec"] = out["fetch_age_sec"]
     states = []
+    collection_states = []
     for _, row in out.iterrows():
-        age = int(row.get("market_age_sec", 999999)) if pd.notna(row.get("market_age_sec", np.nan)) else 999999
-        stream = str(row.get("feed_mode", "")).upper() == "STREAM"
+        event_age = int(row.get("market_age_sec", 999999)) if pd.notna(row.get("market_age_sec", np.nan)) else 999999
+        check_age = int(row.get("fetch_age_sec", 999999)) if pd.notna(row.get("fetch_age_sec", np.nan)) else 999999
+        mode = str(row.get("feed_mode", "") or "").upper()
+        stream = mode == "STREAM"
         source_ok = bool(row.get("source_ok", False))
         price_ok = pd.notna(row.get("latest_close", np.nan))
-        if stream and source_ok and price_ok and age <= MAX_DATA_AGE_SECONDS:
+        attempted = bool(row.get("check_attempted", True))
+        if attempted and check_age <= MAX_DATA_AGE_SECONDS:
+            collection_states.append("CHECKED" if source_ok else "CHECKED · DEGRADED")
+        else:
+            collection_states.append("CHECK STALE")
+
+        if stream and source_ok and price_ok and event_age <= MAX_DATA_AGE_SECONDS:
             explicit = str(row.get("route_session", "") or "").upper()
             session_ref = str(row.get("session_reference_state", "") or "").upper()
             routed = str(row.get("route_accuracy", "") or "").upper() == "ECONOMIC EQUIVALENT"
             states.append("EXTENDED" if explicit == "EXTENDED" or routed or session_ref in {"CLOSED", "BREAK"} else "LIVE")
-        elif not source_ok or not price_ok:
+        elif mode == "POLL" and source_ok and price_ok and check_age <= MAX_DATA_AGE_SECONDS:
+            # Fresh collection is not the same as a fresh market event. Keep both clocks visible.
+            states.append("CURRENT" if event_age <= MAX_DATA_AGE_SECONDS else "CHECKED")
+        elif price_ok and mode.startswith("HOLD"):
+            states.append("DEGRADED")
+        elif not price_ok:
             states.append("UNAVAILABLE")
         else:
             states.append("STALE")
     out["market_state"] = states
+    out["collection_state"] = collection_states
     out["monitor_symbol"] = out["active_provider_symbol"].fillna(out["symbol"]).astype(str)
     out["monitor_price"] = pd.to_numeric(out["latest_close"], errors="coerce")
-    out["monitor_age_sec"] = pd.to_numeric(out["market_age_sec"], errors="coerce")
+    out["monitor_age_sec"] = pd.to_numeric(out["collection_age_sec"], errors="coerce")
     out["monitor_source"] = out["source"].astype(str)
     out["monitor_mode"] = out["price_type"].fillna("REFERENCE").astype(str)
     out["monitor_status"] = out["market_state"].astype(str)
@@ -818,21 +881,24 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["age_sec"] = out["market_age_sec"]
 
     def row_freshness(r: pd.Series) -> str:
-        if not bool(r.get("source_ok", False)) or pd.isna(r.get("latest_close", np.nan)):
-            return "OFFLINE"
-        mstate = str(r.get("market_state", "UNKNOWN"))
-        age = int(r.get("market_age_sec", 999999))
-        if age <= 5 and str(r.get("feed_mode", "")).upper() == "STREAM":
-            return "LIVE"
-        if age <= MAX_DATA_AGE_SECONDS and str(r.get("feed_mode", "")).upper() == "STREAM":
-            return "CURRENT"
-        if mstate in {"CLOSED", "BREAK"}:
-            proxy_age = r.get("live_proxy_age_sec", np.nan)
-            if pd.notna(proxy_age) and float(proxy_age) <= MAX_DATA_AGE_SECONDS:
-                return "REFERENCE · PROXY LIVE"
-            return "REFERENCE" if mstate == "CLOSED" else "BREAK"
-        if age <= MAX_DATA_AGE_SECONDS:
-            return "CURRENT"
+        price_ok = pd.notna(r.get("latest_close", np.nan))
+        mode = str(r.get("feed_mode", "") or "").upper()
+        event_age = int(r.get("market_age_sec", 999999))
+        check_age = int(r.get("fetch_age_sec", 999999))
+        if not price_ok:
+            return "NO QUOTE"
+        if mode == "STREAM":
+            if event_age <= 5:
+                return "LIVE"
+            if event_age <= MAX_DATA_AGE_SECONDS:
+                return "CURRENT"
+            return "STREAM STALE"
+        if mode == "POLL" and check_age <= MAX_DATA_AGE_SECONDS:
+            if event_age <= MAX_DATA_AGE_SECONDS:
+                return "CURRENT · CHECKED"
+            return f"CHECKED · EVENT {event_age}s"
+        if mode.startswith("HOLD"):
+            return "LAST VERIFIED"
         return "STALE"
 
     out["freshness"] = out.apply(row_freshness, axis=1)
@@ -1457,7 +1523,7 @@ def health_card(df: pd.DataFrame, selected_symbol: str) -> str:
 
 def render_sidebar() -> tuple[str, bool, int]:
     with st.sidebar:
-        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v10.0</span></div><div class='small'>QUOTE-DETECTED EXTENDED MARKET ROUTER · GEO + MARKET</div>", unsafe_allow_html=True)
+        st.markdown("<div class='mid'>🌐 MACRO REGIME ENGINE <span class='cyan'>v10.0</span></div><div class='small'>COLLECTION-INTEGRITY LIVE ROUTER · GEO + MARKET</div>", unsafe_allow_html=True)
         st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
         pages = [
             "Dashboard", "Instruments", "Flow Tracker", "Options / Pressure", "Sectors", "Defense / Aero",
@@ -1529,7 +1595,7 @@ st.session_state.setdefault("runtime_dxfeed_symbol_map_json", "")
 
 page, auto_refresh, refresh_interval = render_sidebar()
 if auto_refresh and st_autorefresh:
-    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v100")
+    st_autorefresh(interval=min(refresh_interval, MAX_DATA_AGE_SECONDS) * 1000, key="global_refresh_v101")
 
 # One universe state, continuously overlaid by provider WebSockets. Stream ingestion is
 # independent of Streamlit reruns; every page reads the same thread-safe live hub.
@@ -1538,7 +1604,7 @@ universe_df = enrich(raw_universe)
 _active = universe_df[universe_df["market_state"].isin(["LIVE", "EXTENDED"])] if not universe_df.empty else universe_df
 snapshot_age = int(_active["market_age_sec"].max()) if len(_active) else 0
 snapshot_state, snapshot_tone = health_state(snapshot_age) if len(_active) else ("IDLE", "yellow")
-_check_age = pd.to_numeric(universe_df.get("monitor_age_sec", pd.Series(dtype=float)), errors="coerce")
+_check_age = pd.to_numeric(universe_df.get("collection_age_sec", universe_df.get("fetch_age_sec", pd.Series(dtype=float))), errors="coerce")
 check_total = int(len(universe_df))
 check_fresh = int((_check_age <= MAX_DATA_AGE_SECONDS).sum()) if check_total else 0
 check_stale = max(0, check_total - check_fresh)
@@ -1559,25 +1625,27 @@ with h1:
 with h2:
     st.markdown(f"<div class='micro'>Toronto</div><div class='mid'>{now_et().strftime('%-I:%M %p')}</div>", unsafe_allow_html=True)
 with h3:
-    st.markdown(f"<div class='micro'>Live Checks</div><div class='{check_tone}' style='font-weight:900'>{check_fresh}/{check_total} ≤25s</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='micro'>Collection</div><div class='{check_tone}' style='font-weight:900'>{check_fresh}/{check_total} ≤25s</div>", unsafe_allow_html=True)
 with h4:
     pstat_header = pd.DataFrame(provider_status)
     mt5_live = False
     massive_live = False
     databento_live = False
+    dxfeed_live = False
     if not pstat_header.empty:
         live_mask = pstat_header["connected"].fillna(False) & pstat_header["authenticated"].fillna(False)
         mt5_live = bool(((pstat_header["provider"] == "mt5") & live_mask).any())
         massive_live = bool(((pstat_header["provider"] == "massive") & live_mask).any())
         databento_live = bool(((pstat_header["provider"] == "databento") & live_mask).any())
-    live_count = int(mt5_live) + int(massive_live) + int(databento_live)
-    configured_count = int(bool(provider_config.get("mt5"))) + int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
+        dxfeed_live = bool(((pstat_header["provider"] == "dxfeed") & live_mask).any())
+    live_count = int(mt5_live) + int(massive_live) + int(databento_live) + int(dxfeed_live)
+    configured_count = sum(int(bool(provider_config.get(k))) for k in ("mt5", "massive", "databento", "dxfeed"))
     if live_count:
         engine_text = f"{live_count} SOURCE{'S' if live_count != 1 else ''} STREAMING · UI {refresh_interval}s"
     elif configured_count:
         engine_text = f"CONNECTING · UI {refresh_interval}s"
     else:
-        engine_text = f"FALLBACK · UI {refresh_interval}s"
+        engine_text = f"PUBLIC CHECK · UI {refresh_interval}s"
     st.markdown(f"<div class='micro'>Live Engine</div><div class='mid'>{engine_text}</div>", unsafe_allow_html=True)
 with h5:
     if st.button("↻ UPDATE", key="global_update"):
@@ -1803,7 +1871,7 @@ if page == "Dashboard":
 
     with diag_tab:
         st.markdown("<div class='shell'><div class='section-title'>Selected Instrument · synchronized direct data</div>", unsafe_allow_html=True)
-        diag_cols = [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "market_state", "market_age_sec", "freshness", "source", "feed_mode", "price_type", "active_provider_symbol", "reference_price", "reference_source", "provider_ts", "live_proxy_symbol", "live_proxy_price", "bid", "ask", "book_imbalance", "role"] if c in rel_df.columns]
+        diag_cols = [c for c in ["symbol", "name", "category", "latest_close", "change_pct", "score", "quality", "state", "market_state", "collection_state", "collection_age_sec", "event_age_sec", "market_age_sec", "freshness", "source", "feed_mode", "price_type", "active_provider_symbol", "reference_price", "reference_source", "provider_ts", "live_proxy_symbol", "live_proxy_price", "bid", "ask", "book_imbalance", "role"] if c in rel_df.columns]
         render_editable_table(rel_df[diag_cols].copy(), "dashboard_diagnostics_table")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1937,7 +2005,7 @@ elif page == "Events":
     st.markdown("</div>", unsafe_allow_html=True)
 
 elif page == "Data Health":
-    st.markdown("<div class='shell'><div class='section-title'>Data Health · Always-On Provider + Instrument Clocks</div>", unsafe_allow_html=True)
+    st.markdown("<div class='shell'><div class='section-title'>Data Health · Collection Integrity + Provider Clocks</div>", unsafe_allow_html=True)
     st.markdown(health_card(universe_df, selected_symbol), unsafe_allow_html=True)
 
     cfg1, cfg2, cfg3, cfg4, cfg5 = st.columns(5)
@@ -1953,9 +2021,9 @@ elif page == "Data Health":
     with cfg5:
         st.markdown(card_html("Databento Key", _credential_origin("DATABENTO_API_KEY"), "CME futures · L1", "green" if provider_config.get("databento") else "yellow", "SOURCE"), unsafe_allow_html=True)
 
-    configured_count = int(bool(provider_config.get("mt5"))) + int(bool(provider_config.get("massive"))) + int(bool(provider_config.get("databento")))
+    configured_count = sum(int(bool(provider_config.get(k))) for k in ("mt5", "massive", "databento", "dxfeed"))
     if configured_count < 1:
-        st.warning("No dedicated live source is available. Install the optional MT5 connector on the local Windows machine or configure Massive/Databento. yfinance remains a timestamp-correct reference fallback only and is never promoted to LIVE by a UI refresh.")
+        st.warning("No dedicated live source is available. Install the optional MT5 connector on the local Windows machine or configure dxFeed, Massive, or Databento. Public collection remains timestamp-correct and is checked continuously; exchange-delayed data is never promoted to direct LIVE. Configure at least one direct provider for true real-time coverage.")
 
     pstat = pd.DataFrame(provider_status)
     if not pstat.empty:
@@ -1964,9 +2032,9 @@ elif page == "Data Health":
         st.markdown("<div class='section-title' style='margin-top:8px'>Provider Connections</div>", unsafe_allow_html=True)
         st.dataframe(pstat[["provider", "channel", "state", "message_age_sec", "last_message_at", "reconnects", "last_error"]], use_container_width=True, hide_index=True)
 
-    st.markdown("<div class='section-title' style='margin-top:8px'>Per-Instrument Always-On Clock</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title' style='margin-top:8px'>Per-Instrument Collection + Market Clocks</div>", unsafe_allow_html=True)
     st.caption("DIRECT/BROKER LIVE = a real provider is publishing an actual level for this dashboard instrument now. OFFICIAL INDEX = the calculating index feed. REFERENCE/PROXY is used only when no direct real quote exists. The original official/reference value is always retained separately for audit.")
-    health_cols = [c for c in ["symbol", "name", "category", "market_state", "latest_close", "price_type", "active_provider_symbol", "reference_price", "reference_source", "market_age_sec", "fetch_age_sec", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "source", "feed_mode", "provider_ts", "received_ts", "source_ok"] if c in universe_df.columns]
+    health_cols = [c for c in ["symbol", "name", "category", "market_state", "latest_close", "price_type", "active_provider_symbol", "reference_price", "reference_source", "collection_age_sec", "event_age_sec", "market_age_sec", "fetch_age_sec", "collection_state", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "source", "feed_mode", "provider_ts", "received_ts", "source_ok"] if c in universe_df.columns]
     health_view = universe_df[health_cols].copy()
     if "monitor_age_sec" in health_view.columns:
         health_view = health_view.sort_values(["monitor_age_sec", "symbol"], ascending=[False, True], na_position="first")
@@ -1989,7 +2057,7 @@ elif page == "Raw Data":
         raw_view = raw_view[raw_view.apply(lambda r: q in f"{r['symbol']} {r['name']} {r['category']} {r['role']}".upper(), axis=1)]
     raw_view = raw_view.rename(columns={
         "symbol": "SOURCE", "category": "DOMAIN", "latest_close": "VALUE", "change_pct": "Δ %",
-        "market_age_sec": "MARKET AGE", "fetch_age_sec": "FETCH AGE", "freshness": "STATUS", "source": "FEED",
+        "collection_age_sec": "CHECK AGE", "event_age_sec": "EVENT AGE", "market_age_sec": "MARKET AGE", "fetch_age_sec": "FETCH AGE", "freshness": "STATUS", "source": "FEED",
     })
     raw_cols = [c for c in ["SOURCE", "name", "DOMAIN", "VALUE", "Δ %", "market_state", "MARKET AGE", "FETCH AGE", "STATUS", "FEED", "feed_mode", "provider_ts", "received_ts", "bid", "ask", "bid_size", "ask_size", "spread", "book_imbalance", "orderflow_source", "volume", "volume_1s", "volume_1m", "session_volume", "relative_volume", "volume_delta_pct", "volume_source", "volume_proxy_symbol", "live_proxy_symbol", "live_proxy_price", "live_proxy_age_sec", "monitor_mode", "monitor_symbol", "monitor_price", "monitor_age_sec", "monitor_status", "monitor_source", "price_type", "active_provider_symbol", "reference_price", "reference_source", "reference_provider_ts", "source_ok"] if c in raw_view.columns]
     render_editable_table(raw_view[raw_cols].copy(), "raw_data_table")
@@ -1999,6 +2067,6 @@ elif page == "Raw Data":
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown(
-    f"<div class='footerbar'>Macro Regime Engine {APP_VERSION} · always-on provider hub · UI redraw {refresh_interval}s · active-market stale ceiling {MAX_DATA_AGE_SECONDS}s</div>",
+    f"<div class='footerbar'>Macro Regime Engine {APP_VERSION} · always-on provider hub · UI redraw {refresh_interval}s · collection SLA {MAX_DATA_AGE_SECONDS}s</div>",
     unsafe_allow_html=True,
 )

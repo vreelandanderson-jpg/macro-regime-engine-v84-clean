@@ -182,6 +182,18 @@ def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
+def _age_seconds(value: str | None) -> float:
+    if not value:
+        return 999999.0
+    try:
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return max(0.0, time.time() - dt.timestamp())
+    except Exception:
+        return 999999.0
+
+
 def _clean_price(value: Any, fixed_hint: bool = False) -> float | None:
     try:
         x = float(value)
@@ -356,9 +368,17 @@ class LiveMarketHub:
         source_id: str = "",
         route_session: str = "",
         route_accuracy: str = "EXACT",
+        feed_mode: str = "STREAM",
     ) -> None:
         if price is None or not math.isfinite(price):
             return
+        mode_upper = str(feed_mode or "STREAM").upper()
+        if mode_upper == "STREAM":
+            # Direct providers must prove freshness with their own market timestamp.
+            # A delayed entitlement or old replay packet is never allowed to replace a
+            # newer public/reference value merely because it arrived over a live socket.
+            if not provider_ts or _age_seconds(provider_ts) > 25.0:
+                return
         now_epoch = time.time()
         source_id = source_id or source
         with self.lock:
@@ -368,13 +388,10 @@ class LiveMarketHub:
             # take over immediately. This prevents random provider races and enables
             # automatic failover across the entire instrument universe.
             prev_priority = int(previous.get("_priority", 9999) or 9999)
-            prev_received = previous.get("received_ts")
-            prev_age = 999999.0
-            if prev_received:
-                try:
-                    prev_age = max(0.0, time.time() - datetime.fromisoformat(str(prev_received)).timestamp())
-                except Exception:
-                    pass
+            # Priority protection is based on the provider's actual event time, not on
+            # when this process happened to receive/re-poll an old value. A delayed
+            # high-priority source must never block a genuinely fresh secondary source.
+            prev_age = _age_seconds(previous.get("provider_ts"))
             if prev_priority < int(priority) and prev_age <= 5.0:
                 return
             h = self.history[(symbol, source_id)]
@@ -405,7 +422,10 @@ class LiveMarketHub:
                 "price_type": price_type,
                 "active_provider_symbol": raw_symbol or symbol,
                 "_priority": int(priority),
-                "feed_mode": "STREAM",
+                "feed_mode": feed_mode,
+                "check_ts": _now_iso(),
+                "check_attempted": True,
+                "check_ok": True,
                 "feed_channel": feed_channel,
                 "raw_symbol": raw_symbol,
                 "route_session": route_session or previous.get("route_session", ""),
